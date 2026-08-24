@@ -4,7 +4,6 @@
 
 ![GitHub stars](https://img.shields.io/github/stars/TOBYCAI/dsh-sessions-manager?style=flat-square&color=facc15)
 ![Downloads](https://img.shields.io/github/downloads/TOBYCAI/dsh-sessions-manager/total?style=flat-square&color=14b8a6)
-![Downloads@latest](https://img.shields.io/github/downloads/TOBYCAI/dsh-sessions-manager/latest/total?style=flat-square&color=14b8a6)
 ![License](https://img.shields.io/badge/license-MIT-3b82f6?style=flat-square)
 ![daily compat](https://img.shields.io/github/actions/workflow/status/TOBYCAI/dsh-sessions-manager/compat.yml?branch=main&label=daily-compat&style=flat-square)
 ![DSH plugin](https://img.shields.io/badge/DSH-plugin-4d6bfe?style=flat-square)
