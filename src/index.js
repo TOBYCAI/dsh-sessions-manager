@@ -8,7 +8,9 @@
 // session persistence, physically removes a session's log file on delete, and
 // relocates a conversation (session) between workspaces on move.
 import { mkdir, realpath, rename, stat, unlink } from 'node:fs/promises'
-import { basename, isAbsolute, join } from 'node:path'
+import { basename, dirname, isAbsolute, join } from 'node:path'
+import { readFileSync, writeFileSync } from 'node:fs'
+import zlib from 'node:zlib'
 import { homedir } from 'node:os'
 
 export const name = 'dsh-sessions-manager'
@@ -280,19 +282,55 @@ export function apply(ctx) {
       return null
     }
 
+    // Rewrite only the first zstd frame's cwd to `newCwd`. DSH stores each
+    // session as concatenated independent zstd frames; frame0 is exactly
+    // `JSON.stringify(headerLineObj) + "\n"`. We slice frame0 by its trailing
+    // magic boundary, decode, mutate cwd, recompress with the same checksum
+    // flag, and concatenate the remaining frames untouched. This keeps the log
+    // valid for the persistence layer's frame0 reader while moving it to the
+    // new workspace without a full re-encode.
+    const ZSTD_MAGIC = 4247762216
+    const CHECKSUM_OPTS = { params: { [zlib.constants.ZSTD_c_checksumFlag]: 1 } }
+    function rewriteFrame0Cwd(filePath, newCwd) {
+      const buf = readFileSync(filePath)
+      const starts = []
+      for (let i = 0; i + 4 <= buf.length; i++) {
+        if (buf.readUInt32LE(i) === ZSTD_MAGIC) starts.push(i)
+      }
+      if (starts.length === 0) throw new Error('会话日志格式异常（无 zstd 帧）')
+      const end0 = starts.length > 1 ? starts[1] : buf.length
+      const frame0 = buf.subarray(starts[0], end0)
+      const text = zlib.zstdDecompressSync(frame0).toString('utf8')
+      const nl = text.indexOf('\n')
+      const line = nl >= 0 ? text.slice(0, nl) : text
+      const obj = JSON.parse(line)
+      if (obj.cwd === newCwd) return  // already correct, no rewrite needed
+      obj.cwd = newCwd
+      const newFrame0 = zlib.zstdCompressSync(JSON.stringify(obj) + '\n', CHECKSUM_OPTS)
+      const rest = buf.subarray(end0)
+      writeFileSync(filePath, Buffer.concat([newFrame0, rest]))
+    }
+
     if (isOpen) {
-      // Live session: move the log file, then point the live object's header
-      // and the persistence state's cwd at the new location. No create() call.
+      // Live session: relocate the on-disk log (rewriting frame0's cwd to the
+      // new path) and redirect the live object + persistence state. We must
+      // rewrite frame0, not just rename: sp.list() reads frame0's cwd from
+      // disk, and WorkspaceEntity.sessionIds filters by that exact cwd. A bare
+      // rename would leave frame0 pointing at the old workspace, so reindex /
+      // restart would keep attributing the session to the wrong workspace.
       const oldPath = locatePath(meta)
       const newPath = locatePath(newHeader)
       if (oldPath && newPath && oldPath !== newPath) {
         const backupPath = `${oldPath}.move-backup-${Date.now()}`
         try {
-          await rename(oldPath, backupPath)   // current log to safety
-          await rename(backupPath, newPath)    // relocate to the new workspace dir
+          // Ensure the destination project directory exists (rename does not
+          // create it). Without this, the rename silently no-ops on ENOENT and
+          // the log stays put while workspace.json is wrongly updated.
+          await mkdir(dirname(newPath), { recursive: true })
+          await rename(oldPath, backupPath)         // current log to safety
+          await rewriteFrame0Cwd(backupPath, canonical) // frame0 cwd -> newPath
+          await rename(backupPath, newPath)         // relocate to the new workspace dir
         } catch (e) {
-          // A missing source means the session was never materialized on disk;
-          // the next append will create it at newPath. Any other error aborts.
           try { await rename(backupPath, oldPath) } catch (_) {}
           if (e && e.code !== 'ENOENT') throw new Error('移动会话日志失败：' + String((e && e.message) || e))
         }
