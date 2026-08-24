@@ -341,18 +341,11 @@ export function apply(ctx) {
       if (backupPath) { try { await unlink(backupPath) } catch (e) {} }
     }
 
-    // 2) Reassign workspace membership (durable records + in-memory index).
-    for (const ent of w.list()) {
-      try { await ent.detachSession(sid) } catch (e) { /* ignore */ }
-    }
-    if (w.headers && typeof w.headers.set === 'function') w.headers.set(sid, newHeader)
-    if (w.sessionPaths && typeof w.sessionPaths.set === 'function') w.sessionPaths.set(sid, canonical)
-    await target.attachSession(sid)
-
     // Keep the live (in-memory) session object consistent with the relocated
-    // log so the host doesn't keep appending to the old path. attachSession
-    // reads live.header to validate cwd, so updating it here is what lets the
-    // move succeed for an open session.
+    // log so the host doesn't keep appending to the old path. This MUST happen
+    // before attachSession(): WorkspaceEntity.attachSession() validates the
+    // session by reading live.header first, and if it still carries the old cwd
+    // the realpath check will fail on the old (now missing) directory.
     try {
       if (liveObj) {
         if ('header' in liveObj) liveObj.header = newHeader
@@ -360,6 +353,14 @@ export function apply(ctx) {
         if ('meta' in liveObj) liveObj.meta = newHeader
       }
     } catch (e) { /* best-effort */ }
+
+    // 2) Reassign workspace membership (durable records + in-memory index).
+    for (const ent of w.list()) {
+      try { await ent.detachSession(sid) } catch (e) { /* ignore */ }
+    }
+    if (w.headers && typeof w.headers.set === 'function') w.headers.set(sid, newHeader)
+    if (w.sessionPaths && typeof w.sessionPaths.set === 'function') w.sessionPaths.set(sid, canonical)
+    await target.attachSession(sid)
 
     return {
       ok: true,
