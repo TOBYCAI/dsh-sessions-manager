@@ -383,6 +383,25 @@ export function apply(ctx) {
     }
   }
 
+  // Force the host's WorkspaceRegistry to rebuild its in-memory sessionPath
+  // index from the durable persistence headers. DSH's WorkspaceEntity.sessionIds
+  // is a *getter* that filters record.sessionIds by `host.sessionPath(id) ===
+  // record.path`; that sessionPath Map is only repopulated at startup (bootstrap
+  // + indexHeaders). So even after a successful move writes the durable cwd,
+  // the running process keeps attributing the session to its OLD workspace until
+  // a restart — unless we reindex here. Calling this right after move makes the
+  // sidebar reflect the new grouping with NO restart required.
+  async function reindexRegistry() {
+    const reg = w
+    if (!reg || typeof reg.replaceHeaderIndex !== 'function') return false
+    let headers = null
+    try { headers = await sp.list() } catch (e) { headers = null }
+    if (!headers || !Array.isArray(headers)) return false
+    await reg.replaceHeaderIndex(headers)
+    if (typeof reg.rebuildEntities === 'function') reg.rebuildEntities()
+    return true
+  }
+
   async function listWorkspaces() {
     const out = []
     try {
@@ -688,6 +707,9 @@ export function apply(ctx) {
           if (!sid) return json(res, { ok: false, error: 'missing sessionId' }, 400)
           if (!target) return json(res, { ok: false, error: 'missing targetPath' }, 400)
           json(res, { sessionId: sid, ...(await moveOne(sid, target)) })
+          // Reindex the host's in-memory sessionPath index so the sidebar
+          // reflects the new grouping immediately (no DSH restart needed).
+          try { await reindexRegistry() } catch (e) { /* best-effort */ }
         } catch (e) {
           json(res, { ok: false, error: String((e && e.message) || e) }, 500)
         }
