@@ -256,48 +256,92 @@ export function apply(ctx) {
 
     const newHeader = Object.assign({}, meta, { cwd: canonical })
 
-    // 1) Back up the current log artifact before touching anything.
-    let oldPath = null
-    let backupPath = null
-    try {
-      const loc = sp.locate(meta)
-      if (loc && typeof loc.path === 'string' && loc.path) oldPath = loc.path
-    } catch (e) { oldPath = null }
-    if (oldPath) {
-      backupPath = `${oldPath}.move-backup-${Date.now()}`
+    // 1) Decide relocation strategy by whether the session is currently live.
+    // `sessionPersistence.create()` rejects ("already exists in this backend")
+    // for any session the host has instantiated (opened in the UI), because DSH
+    // keeps it in its in-memory `states` even after you switch away. So we must
+    // NOT call create() for live sessions; instead we relocate the on-disk log
+    // and redirect the live object + persistence state to the new cwd. For a
+    // genuinely closed session (only on disk) the create()+append() path is safe.
+    const live = ctx.get('sessions')
+    const liveObj = live && live.get && live.get(sid)
+    const isOpen = !!liveObj
+
+    const locatePath = (header) => {
+      let fn = null
+      try { if (typeof sp.locate === 'function') fn = sp.locate.bind(sp) } catch (e) {}
+      if (!fn && sp.backend && typeof sp.backend.locate === 'function') fn = sp.backend.locate.bind(sp.backend)
+      if (!fn) return null
       try {
-        await rename(oldPath, backupPath)
+        const loc = fn(header)
+        if (loc && typeof loc.path === 'string') return loc.path
+        if (typeof loc === 'string') return loc
+      } catch (e) {}
+      return null
+    }
+
+    if (isOpen) {
+      // Live session: move the log file, then point the live object's header
+      // and the persistence state's cwd at the new location. No create() call.
+      const oldPath = locatePath(meta)
+      const newPath = locatePath(newHeader)
+      if (oldPath && newPath && oldPath !== newPath) {
+        const backupPath = `${oldPath}.move-backup-${Date.now()}`
+        try {
+          await rename(oldPath, backupPath)   // current log to safety
+          await rename(backupPath, newPath)    // relocate to the new workspace dir
+        } catch (e) {
+          // A missing source means the session was never materialized on disk;
+          // the next append will create it at newPath. Any other error aborts.
+          try { await rename(backupPath, oldPath) } catch (_) {}
+          if (e && e.code !== 'ENOENT') throw new Error('移动会话日志失败：' + String((e && e.message) || e))
+        }
+      }
+      // Redirect the persistence state's cwd so future appends land in newPath.
+      try {
+        const st = sp.states && sp.states.get && sp.states.get(sid)
+        if (st && st.meta) st.meta = Object.assign({}, st.meta, { cwd: canonical })
+      } catch (e) { /* best-effort */ }
+    } else {
+      // Closed session: recreate at the new location through the persistence
+      // service (re-encodes the header with the new cwd).
+      let oldPath = null
+      let backupPath = null
+      try {
+        const loc = locatePath(meta)
+        if (loc && loc.path) oldPath = loc.path
+      } catch (e) { oldPath = null }
+      if (oldPath) {
+        backupPath = `${oldPath}.move-backup-${Date.now()}`
+        try {
+          await rename(oldPath, backupPath)
+        } catch (e) {
+          if (e && e.code !== 'ENOENT') throw new Error('移动失败：无法备份旧的会话日志')
+          backupPath = null
+        }
+      }
+      const restore = async () => {
+        if (backupPath && oldPath) { try { await rename(backupPath, oldPath) } catch (e) {} }
+      }
+      if (typeof sp.create !== 'function' || typeof sp.append !== 'function') {
+        await restore()
+        throw new Error('当前会话存储后端不支持安全移动，已中止。')
+      }
+      try {
+        await sp.create(newHeader)
+        await sp.append(sid, events)
+        const check = await sp.readFrom(sid, 0)
+        if (!check || !check.meta || check.meta.cwd !== canonical) {
+          throw new Error('移动后校验失败：会话工作目录未正确更新')
+        }
       } catch (e) {
-        if (e && e.code !== 'ENOENT') throw new Error('移动失败：无法备份旧的会话日志')
-        backupPath = null
+        await restore()
+        throw new Error('移动会话日志失败：' + String((e && e.message) || e))
       }
+      if (backupPath) { try { await unlink(backupPath) } catch (e) {} }
     }
 
-    const restore = async () => {
-      if (backupPath && oldPath) {
-        try { await rename(backupPath, oldPath) } catch (e) { /* best-effort */ }
-      }
-    }
-
-    // 2) Relocate the log through the persistence service (re-encodes header).
-    if (typeof sp.create !== 'function' || typeof sp.append !== 'function') {
-      await restore()
-      throw new Error('当前会话存储后端不支持安全移动，已中止。')
-    }
-    try {
-      await sp.create(newHeader)
-      await sp.append(sid, events)
-      const check = await sp.readFrom(sid, 0)
-      if (!check || !check.meta || check.meta.cwd !== canonical) {
-        throw new Error('移动后校验失败：会话工作目录未正确更新')
-      }
-    } catch (e) {
-      await restore()
-      throw new Error('移动会话日志失败：' + String((e && e.message) || e))
-    }
-    if (backupPath) { try { await unlink(backupPath) } catch (e) { /* best-effort */ } }
-
-    // 3) Reassign workspace membership (durable records + in-memory index).
+    // 2) Reassign workspace membership (durable records + in-memory index).
     for (const ent of w.list()) {
       try { await ent.detachSession(sid) } catch (e) { /* ignore */ }
     }
@@ -305,16 +349,15 @@ export function apply(ctx) {
     if (w.sessionPaths && typeof w.sessionPaths.set === 'function') w.sessionPaths.set(sid, canonical)
     await target.attachSession(sid)
 
-    // Keep any live (in-memory) session object consistent with the relocated
-    // log so the host doesn't keep appending to the old path. Best-effort: the
-    // live object's exact field names vary across host versions.
+    // Keep the live (in-memory) session object consistent with the relocated
+    // log so the host doesn't keep appending to the old path. attachSession
+    // reads live.header to validate cwd, so updating it here is what lets the
+    // move succeed for an open session.
     try {
-      const live = ctx.get('sessions')
-      const obj = live && live.get && live.get(sid)
-      if (obj) {
-        if ('header' in obj) obj.header = newHeader
-        if ('cwd' in obj) obj.cwd = canonical
-        if ('meta' in obj) obj.meta = newHeader
+      if (liveObj) {
+        if ('header' in liveObj) liveObj.header = newHeader
+        if ('cwd' in liveObj) liveObj.cwd = canonical
+        if ('meta' in liveObj) liveObj.meta = newHeader
       }
     } catch (e) { /* best-effort */ }
 
