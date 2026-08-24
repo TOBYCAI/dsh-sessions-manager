@@ -49,6 +49,29 @@ function parseIds(body) {
   return ids
 }
 
+// Best-effort: figure out which conversation is the host's *currently active*
+// one. DSH's in-memory session store (ctx.sessions) keeps EVERY instantiated
+// session alive even after you switch away in the UI, so "is it in
+// ctx.sessions" is NOT the same as "is it the active conversation". We probe a
+// few known accessors for the active id; if none is available we return null
+// and callers should treat the session as movable (the move path is
+// crash-safe via backup+rollback and re-syncs the live object afterwards).
+function getActiveSessionId(context) {
+  try {
+    const a = context.get('activeSession')
+    if (a != null) return (a && a.id != null) ? a.id : (typeof a === 'string' ? a : null)
+  } catch (e) { /* no such key */ }
+  try {
+    const c = context.get('currentSession')
+    if (c != null) return (c && c.id != null) ? c.id : (typeof c === 'string' ? c : null)
+  } catch (e) { /* no such key */ }
+  try {
+    const store = context.get('sessions')
+    if (store && store.active && store.active.id != null) return store.active.id
+  } catch (e) { /* no such key */ }
+  return null
+}
+
 function foldTitle(events) {
   let found = null
   let firstUser = null
@@ -134,9 +157,13 @@ export function apply(ctx) {
   // Physically delete one session log + clear archive/workspace accounting;
   // throws on failure (live sessions are rejected).
   async function deleteOne(sid) {
-    const sessions = ctx.get('sessions')
-    if (sessions && sessions.get(sid)) {
-      throw new Error('该会话当前处于打开状态，请先切换到别的会话再删除。')
+    // Only block the *active* conversation. ctx.sessions retains instantiated
+    // sessions after you switch away, so checking it directly would wrongly
+    // reject every session you've ever opened. When the host doesn't expose an
+    // active-session accessor we cannot prove activeness and allow the delete.
+    const activeId = getActiveSessionId(ctx)
+    if (activeId != null && String(activeId) === String(sid)) {
+      throw new Error('该会话是当前活动会话，请先切换到别的会话再删除。')
     }
     let removedPath = null
     try {
@@ -201,8 +228,14 @@ export function apply(ctx) {
   }
 
   async function moveOne(sid, targetPath) {
-    const sessions = ctx.get('sessions')
-    if (sessions && sessions.get(sid)) {
+    // Only block the *active* conversation. ctx.sessions keeps instantiated
+    // sessions alive after you switch away, so the old check (sessions.get(sid))
+    // wrongly rejected every opened session — you could never move one you'd
+    // merely looked at. When the host exposes no active-session accessor we
+    // can't prove activeness, so we allow the move; the relocation below is
+    // crash-safe (backup + rollback) and re-syncs the live object.
+    const activeId = getActiveSessionId(ctx)
+    if (activeId != null && String(activeId) === String(sid)) {
       throw new Error('该会话当前处于打开状态，请先切换到别的会话再移动。')
     }
     const r = await sp.readFrom(sid, 0)
@@ -271,6 +304,19 @@ export function apply(ctx) {
     if (w.headers && typeof w.headers.set === 'function') w.headers.set(sid, newHeader)
     if (w.sessionPaths && typeof w.sessionPaths.set === 'function') w.sessionPaths.set(sid, canonical)
     await target.attachSession(sid)
+
+    // Keep any live (in-memory) session object consistent with the relocated
+    // log so the host doesn't keep appending to the old path. Best-effort: the
+    // live object's exact field names vary across host versions.
+    try {
+      const live = ctx.get('sessions')
+      const obj = live && live.get && live.get(sid)
+      if (obj) {
+        if ('header' in obj) obj.header = newHeader
+        if ('cwd' in obj) obj.cwd = canonical
+        if ('meta' in obj) obj.meta = newHeader
+      }
+    } catch (e) { /* best-effort */ }
 
     return {
       ok: true,
