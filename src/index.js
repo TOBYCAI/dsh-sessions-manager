@@ -362,6 +362,18 @@ export function apply(ctx) {
     if (w.sessionPaths && typeof w.sessionPaths.set === 'function') w.sessionPaths.set(sid, canonical)
     await target.attachSession(sid)
 
+    // Verify the membership actually landed on the target workspace. DSH's
+    // WorkspaceEntity.attachSession persists asynchronously; if it silently
+    // no-ops (e.g. the session's durable cwd still points elsewhere) the UI
+    // would show "moved" while the sidebar keeps the old grouping. Fail loud
+    // instead of returning a fake success.
+    const verified = (() => {
+      try { return target.sessionIds.includes(sid) } catch (e) { return false }
+    })()
+    if (!verified) {
+      throw new Error('移动后校验失败：会话未出现在目标工作区，请重试或重启 DSH。')
+    }
+
     return {
       ok: true,
       moved: true,
