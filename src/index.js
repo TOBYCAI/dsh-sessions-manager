@@ -258,16 +258,46 @@ export function apply(ctx) {
 
     const newHeader = Object.assign({}, meta, { cwd: canonical })
 
-    // 1) Decide relocation strategy by whether the session is currently live.
-    // `sessionPersistence.create()` rejects ("already exists in this backend")
-    // for any session the host has instantiated (opened in the UI), because DSH
-    // keeps it in its in-memory `states` even after you switch away. So we must
-    // NOT call create() for live sessions; instead we relocate the on-disk log
-    // and redirect the live object + persistence state to the new cwd. For a
-    // genuinely closed session (only on disk) the create()+append() path is safe.
+    // 1) Decide relocation strategy. `sessionPersistence.create()` rejects
+    // ("already exists in this backend") for ANY session the host has
+    // instantiated into its in-memory `states` — and DSH instantiates *every*
+    // session it can find on disk at startup, including ARCHIVED ones. So a
+    // supposedly "closed" archived session is NOT safe for the create()+append()
+    // path; create() will throw. The only universally safe move is to physically
+    // relocate the on-disk log (rewriting frame0's cwd) and redirect the live
+    // object + persistence state. We still attempt create()+append() as the
+    // fast path for genuinely-virgin session ids, but on an already-exists
+    // collision we fall back to the relocate path. That covers live, archived,
+    // and restored sessions alike.
     const live = ctx.get('sessions')
     const liveObj = live && live.get && live.get(sid)
     const isOpen = !!liveObj
+
+    const ALREADY_EXISTS_RE = /already exists in this backend/i
+
+    // Physically relocate a session's on-disk log to `newHeader`'s cwd,
+    // rewriting frame0's cwd so sp.list()/reindex attribute it correctly.
+    // Returns true if a relocation actually happened.
+    const relocateLog = async (header, newHeaderObj) => {
+      const oldPath = locatePath(header)
+      const newPath = locatePath(newHeaderObj)
+      if (!oldPath || !newPath || oldPath === newPath) return false
+      const backupPath = `${oldPath}.move-backup-${Date.now()}`
+      try {
+        // Ensure the destination project directory exists (rename does not
+        // create it). Without this, the rename silently no-ops on ENOENT and
+        // the log stays put while workspace.json is wrongly updated.
+        await mkdir(dirname(newPath), { recursive: true })
+        await rename(oldPath, backupPath)             // current log to safety
+        await rewriteFrame0Cwd(backupPath, canonical) // frame0 cwd -> newPath
+        await rename(backupPath, newPath)             // relocate to the new workspace dir
+      } catch (e) {
+        try { await rename(backupPath, oldPath) } catch (_) {}
+        if (e && e.code !== 'ENOENT') throw e
+        return false
+      }
+      return true
+    }
 
     const locatePath = (header) => {
       let fn = null
@@ -318,65 +348,53 @@ export function apply(ctx) {
       // disk, and WorkspaceEntity.sessionIds filters by that exact cwd. A bare
       // rename would leave frame0 pointing at the old workspace, so reindex /
       // restart would keep attributing the session to the wrong workspace.
-      const oldPath = locatePath(meta)
-      const newPath = locatePath(newHeader)
-      if (oldPath && newPath && oldPath !== newPath) {
-        const backupPath = `${oldPath}.move-backup-${Date.now()}`
-        try {
-          // Ensure the destination project directory exists (rename does not
-          // create it). Without this, the rename silently no-ops on ENOENT and
-          // the log stays put while workspace.json is wrongly updated.
-          await mkdir(dirname(newPath), { recursive: true })
-          await rename(oldPath, backupPath)         // current log to safety
-          await rewriteFrame0Cwd(backupPath, canonical) // frame0 cwd -> newPath
-          await rename(backupPath, newPath)         // relocate to the new workspace dir
-        } catch (e) {
-          try { await rename(backupPath, oldPath) } catch (_) {}
-          if (e && e.code !== 'ENOENT') throw new Error('移动会话日志失败：' + String((e && e.message) || e))
-        }
-      }
+      await relocateLog(meta, newHeader)
       // Redirect the persistence state's cwd so future appends land in newPath.
       try {
         const st = sp.states && sp.states.get && sp.states.get(sid)
         if (st && st.meta) st.meta = Object.assign({}, st.meta, { cwd: canonical })
       } catch (e) { /* best-effort */ }
     } else {
-      // Closed session: recreate at the new location through the persistence
-      // service (re-encodes the header with the new cwd).
+      // Closed session: try the fast create()+append() path first. But DSH
+      // instantiates *all* on-disk sessions (including archived ones) into its
+      // in-memory states at startup, so create() usually throws
+      // "already exists in this backend". On that collision we fall back to a
+      // physical relocate of the existing log (rewriting frame0's cwd), which
+      // is safe and needs no create().
       let oldPath = null
-      let backupPath = null
       try {
         const loc = locatePath(meta)
-        if (loc && loc.path) oldPath = loc.path
+        if (loc && typeof loc === 'string') oldPath = loc
+        else if (loc && loc.path) oldPath = loc.path
       } catch (e) { oldPath = null }
-      if (oldPath) {
-        backupPath = `${oldPath}.move-backup-${Date.now()}`
-        try {
-          await rename(oldPath, backupPath)
-        } catch (e) {
-          if (e && e.code !== 'ENOENT') throw new Error('移动失败：无法备份旧的会话日志')
-          backupPath = null
-        }
-      }
-      const restore = async () => {
-        if (backupPath && oldPath) { try { await rename(backupPath, oldPath) } catch (e) {} }
-      }
+
       if (typeof sp.create !== 'function' || typeof sp.append !== 'function') {
-        await restore()
-        throw new Error('当前会话存储后端不支持安全移动，已中止。')
-      }
-      try {
-        await sp.create(newHeader)
-        await sp.append(sid, events)
-        const check = await sp.readFrom(sid, 0)
-        if (!check || !check.meta || check.meta.cwd !== canonical) {
-          throw new Error('移动后校验失败：会话工作目录未正确更新')
+        // No create primitive: must relocate the existing log directly.
+        await relocateLog(meta, newHeader)
+      } else {
+        const backupPath = oldPath ? `${oldPath}.move-backup-${Date.now()}` : null
+        if (backupPath) { try { await rename(oldPath, backupPath) } catch (e) { if (e && e.code !== 'ENOENT') throw new Error('移动失败：无法备份旧的会话日志') } }
+        const restore = async () => { if (backupPath) { try { await rename(backupPath, oldPath) } catch (_) {} } }
+        try {
+          await sp.create(newHeader)
+          await sp.append(sid, events)
+          const check = await sp.readFrom(sid, 0)
+          if (!check || !check.meta || check.meta.cwd !== canonical) {
+            throw new Error('移动后校验失败：会话工作目录未正确更新')
+          }
+          if (backupPath) { try { await unlink(backupPath) } catch (e) {} }
+        } catch (e) {
+          if (ALREADY_EXISTS_RE.test(String((e && e.message) || e))) {
+            // Collision: the session is already materialized in states (archived
+            // or previously opened). Fall back to physically relocating the log.
+            await restore()
+            await relocateLog(meta, newHeader)
+          } else {
+            await restore()
+            throw new Error('移动会话日志失败：' + String((e && e.message) || e))
+          }
         }
-      } catch (e) {
-        await restore()
-        throw new Error('移动会话日志失败：' + String((e && e.message) || e))
       }
-      if (backupPath) { try { await unlink(backupPath) } catch (e) {} }
     }
 
     // Keep the live (in-memory) session object consistent with the relocated
