@@ -175,11 +175,11 @@ export function apply(ctx) {
   // made restore land in 未分组 instead of the original workspace — so we leave
   // the file where it is and let the sidebar DOM shim hide the row instead.
   async function deleteOne(sid) {
-    // Only block the *active* conversation (same rationale as move).
-    const activeId = getActiveSessionId(ctx)
-    if (activeId != null && String(activeId) === String(sid)) {
-      throw new Error('该会话是当前活动会话，请先切换到别的会话再删除。')
-    }
+    // Soft-delete is always allowed — including the currently-active conversation.
+    // The log file stays in its original workspace dir (recorded in the 回收站
+    // index below), so the live session is unaffected and the entry stays
+    // recoverable from 回收站. (Move, by contrast, physically relocates the file
+    // and still guards the active session in moveTargetWorkspace.)
     let header = null
     let cwd = null
     let title = null
