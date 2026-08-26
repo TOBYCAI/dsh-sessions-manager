@@ -128,4 +128,4 @@ lib/client.js      预构建 client（ModuleLoader CJS handshake）
 
 ## License
 
-[MIT](./LICENSE) © @TOBYCAI
+[MIT](./LICENSE) © TOBYCAI
