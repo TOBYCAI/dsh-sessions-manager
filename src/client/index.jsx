@@ -211,6 +211,8 @@ function SessionPanel({ workspacesSvc }) {
   const [error, setError] = useState(null)
   const [toast, setToast] = useState(null)
   const [picking, setPicking] = useState(false)
+  const [trash, setTrash] = useState([])
+  const [trashBusy, setTrashBusy] = useState(null)
   const [details, setDetails] = useState({})
   const [openDetails, setOpenDetails] = useState(null)
   const [detailsLoading, setDetailsLoading] = useState(null)
@@ -231,12 +233,17 @@ function SessionPanel({ workspacesSvc }) {
       postJSON('/archived-sessions/workspaces', {}),
     ])
       .then(([s, works]) => {
-        setSessions(s.items || [])
+        // Permanently-purged sessions must never re-appear here, even if DSH's
+        // in-memory session index still lists them after the file was unlinked.
+        const purged = dsmLoadPurged()
+        const visible = (s.items || []).filter((x) => !purged.has(String(x.sessionId)))
+        setSessions(visible)
         setWorkspaces(works.items || [])
         setSelected({})
         setDelTarget(null)
         setConfirmBatch(false)
         if (!targetWs && works.items && works.items.length) setTargetWs(works.items[0].workspaceId)
+        loadTrash()
       })
       .catch((e) => setError(String((e && e.message) || e)))
   }
@@ -300,11 +307,40 @@ function SessionPanel({ workspacesSvc }) {
       .then(() => {
         setBusy(null)
         const n = delTarget.title || delTarget.sessionId
-        showToast(`已删除 ${n}`)
+        showToast(`已删除 ${n}（已移入回收站）`)
         setDelTarget(null)
         refresh()
       })
       .catch((e) => { setBusy(null); setDelTarget(null); setError(String((e && e.message) || e)) })
+  }
+
+  const loadTrash = () => {
+    postJSON('/archived-sessions/trash/list', {})
+      .then((r) => setTrash(r.items || []))
+      .catch(() => {})
+  }
+
+  const restoreTrash = (sid) => {
+    if (trashBusy) return
+    setTrashBusy(sid)
+    postJSON('/archived-sessions/trash/restore', { sessionId: sid })
+      .then(() => { setTrashBusy(null); showToast('已恢复会话'); loadTrash(); refresh() })
+      .catch((e) => { setTrashBusy(null); setError(String((e && e.message) || e)) })
+  }
+  const purgeTrash = (sid) => {
+    if (trashBusy) return
+    setTrashBusy(sid)
+    postJSON('/archived-sessions/trash/purge', { sessionId: sid })
+      .then(() => { setTrashBusy(null); showToast('已彻底删除'); dsmMarkPurged([sid]); dsmLoadTrashIds(); loadTrash() })
+      .catch((e) => { setTrashBusy(null); setError(String((e && e.message) || e)) })
+  }
+  const purgeAllTrash = () => {
+    if (trashBusy || !trash.length) return
+    setTrashBusy('__all')
+    const all = trash.map((t) => t.sessionId)
+    postJSON('/archived-sessions/trash/purge-many', { sessionIds: all })
+      .then(() => { setTrashBusy(null); showToast('已清空回收站'); dsmMarkPurged(all); dsmLoadTrashIds(); loadTrash() })
+      .catch((e) => { setTrashBusy(null); setError(String((e && e.message) || e)) })
   }
 
   const doMove = (it) => {
@@ -437,7 +473,7 @@ function SessionPanel({ workspacesSvc }) {
         {sessions !== null && <span className="archv-count" aria-label={`${sessions.length} 个会话`}>{sessions.length}</span>}
       </div>
       <p className="archv-sub">
-        统一管理全部会话：归档 / 恢复 / 彻底删除 / 移动到其他工作区，支持批量。归档会从侧栏隐藏；删除会彻底移除日志，不可恢复。
+        统一管理全部会话：归档 / 恢复 / 移动到其他工作区 / 会话详情 / 批量操作，删除会先进入回收站，可在回收站内恢复或彻底清理。
       </p>
       {error && (
         <div className="archv-err" role="alert">
@@ -622,20 +658,510 @@ function SessionPanel({ workspacesSvc }) {
         <div className="dlg-backdrop" onClick={() => setDelTarget(null)}>
           <div className="dlg" role="alertdialog" aria-modal="true" aria-label="删除会话" onClick={(e) => e.stopPropagation()}>
             <h3 className="dlg-title">删除会话</h3>
-            <p className="dlg-text">确认彻底删除「{delTarget.title || delTarget.sessionId}」？该操作会物理删除会话日志，不可恢复。</p>
+            <p className="dlg-text">确认删除「{delTarget.title || delTarget.sessionId}」？将移入回收站，可在本页底部「回收站」中恢复或彻底删除。</p>
             <div className="dlg-actions">
               <button type="button" className="archv-btn" disabled={busy !== null} onClick={() => setDelTarget(null)}>取消</button>
-              <button type="button" className="archv-btn archv-del" disabled={busy !== null} onClick={doDeleteConfirmed}>{busy === delTarget.sessionId ? '删除中…' : '确认删除'}</button>
+              <button type="button" className="archv-btn archv-del" disabled={busy !== null} onClick={doDeleteConfirmed}>移入回收站</button>
             </div>
           </div>
         </div>
       )}
+      <section className="dsm-trash" aria-label="回收站">
+        <div className="dsm-trash-h">
+          <h3>回收站</h3>
+          <span className="dsm-trash-count">{trash.length ? `（${trash.length} 个待清理）` : '（空）'}{trash.length > 0 && <button type="button" className="archv-btn" style={{ marginLeft: 10 }} disabled={trashBusy !== null} onClick={purgeAllTrash}>清空回收站</button>}</span>
+        </div>
+        {trash.length === 0 ? (
+          <div className="dsm-trash-empty">回收站为空。删除的会话会先进入这里，可恢复或彻底删除。</div>
+        ) : (
+          <div className="dsm-trash-list">
+            {trash.map((t) => (
+              <div key={t.sessionId} className="dsm-trash-row">
+                <span className="dsm-trash-name" title={t.sessionId}>{t.title || t.sessionId}</span>
+                <span className="dsm-trash-date">{fmtDate(t.deletedAt)}</span>
+                <span className="dsm-trash-actions">
+                  <button type="button" className="archv-btn" disabled={trashBusy !== null} onClick={() => restoreTrash(t.sessionId)}>恢复</button>
+                  <button type="button" className="archv-btn archv-del" disabled={trashBusy !== null} onClick={() => purgeTrash(t.sessionId)}>彻底删除</button>
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
     </div>
   )
 }
 
+// ---- Main-page sidebar session "⋯" menu augmentation (DOM shim) -----------
+// DSH core renders the sidebar session list (dsh-client-ui-workspace) with a
+// per-row "⋯" Menu whose items (rename / fork / archive) are hardcoded — there
+// is NO plugin slot for adding per-session menu items, and the row DOM carries
+// no sessionId. To honor the request we augment the already-opened portalled
+// menu via DOM: we watch for a [role="menu"] portalled to document.body whose
+// React fiber chain reaches a SessionNodeItem (i.e. it is a session menu), read
+// the session id (and current cwd) off that fiber, then clone an existing menu
+// item to append "移动会话" / "删除会话". This is intentionally a DOM shim and is
+// fragile against DSH UI updates (class names / fiber shape / menu markup).
+const SIDEBAR_AUG_CSS = `
+.dsm-backdrop{position:fixed;inset:0;z-index:2147483600;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:16px}
+.dsm-dlg{width:min(420px,92vw);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l3);border-radius:14px;padding:18px;box-shadow:0 16px 48px rgb(0 0 0/.28);display:flex;flex-direction:column;gap:12px}
+.dsm-title{font-size:15px;font-weight:650;color:var(--dsw-alias-label-primary);margin:0}
+.dsm-text{font-size:13px;line-height:1.6;color:var(--dsw-alias-label-secondary);margin:0;word-break:break-all}
+.dsm-body{display:flex;flex-direction:column;gap:4px;max-height:280px;overflow:auto}
+.dsm-loading,.dsm-empty{font-size:12px;color:var(--dsw-alias-label-tertiary);padding:4px 2px}
+.dsm-err{font-size:12px;color:var(--dsw-alias-state-error-primary);padding:4px 2px}
+.dsm-opt{appearance:none;display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:9px 11px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);border-radius:9px;font-size:12.5px;cursor:pointer;text-align:left}
+.dsm-opt:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-border-l4)}
+.dsm-opt:disabled{opacity:.55;cursor:default}
+.dsm-opt-cur{border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 45%,transparent);color:var(--dsw-alias-state-business-primary)}
+.dsm-opt-name{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.dsm-opt-sub{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;flex:none;margin-left:8px}
+.dsm-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:2px}
+.dsm-btn{appearance:none;min-height:32px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-secondary);border-radius:9px;font-size:12px;font-weight:500;cursor:pointer}
+.dsm-btn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.dsm-del{color:var(--dsw-alias-state-error-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 45%,transparent)}
+.dsm-del:hover{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent);color:var(--dsw-alias-state-error-primary)}
+.dsm-toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:2147483601;background:var(--dsw-alias-fill-elevated);border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary);padding:9px 16px;border-radius:999px;font-size:12px;box-shadow:0 8px 24px rgb(0 0 0/.18);max-width:min(90vw,420px)}
+.dsm-sub{position:fixed;z-index:1100;box-sizing:border-box;min-width:190px;max-width:320px;padding:4px;display:flex;flex-direction:column;gap:0;background:var(--dsw-specific-menu);border:1px solid var(--dsw-alias-border-inverted);border-radius:12px;box-shadow:var(--dsw-shadow-lv3)}
+.dsm-sub-loading,.dsm-sub-empty{font-size:12px;color:var(--dsw-alias-label-tertiary);padding:6px 10px}
+.dsm-sub-err{font-size:12px;color:var(--dsw-alias-state-error-primary);padding:6px 10px}
+.dsm-sub-item{display:flex;align-items:center;gap:8px;width:100%;min-height:36px;padding:6px 10px;border:none;border-radius:8px;background:transparent;cursor:pointer;font-size:13px;line-height:18px;color:var(--dsw-alias-label-primary);text-align:left}
+.dsm-sub-item:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
+.dsm-sub-item:disabled{opacity:.5;cursor:default}
+.dsm-sub-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsm-sub-cur{font-size:11px;color:var(--dsw-alias-state-business-primary);flex:none;margin-left:8px}
+.dsm-dot{position:absolute;left:6px;top:50%;transform:translateY(-50%);width:8px;height:8px;border-radius:50%;box-sizing:border-box;cursor:pointer;pointer-events:auto;z-index:1}
+.dsm-dot-unread-manual{background:var(--dsw-alias-state-business-primary)}
+.dsm-dot-waiting{background:var(--dsw-alias-state-warning-primary)}
+.dsm-dot-unread{background:var(--dsw-alias-state-success-primary)}
+.dsm-trash{margin-top:18px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:14px}
+.dsm-trash-h{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+.dsm-trash-h h3{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary);margin:0}
+.dsm-trash-count{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.dsm-trash-list{display:flex;flex-direction:column;gap:6px;max-height:260px;overflow:auto}
+.dsm-trash-row{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-fill-elevated)}
+.dsm-trash-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--dsw-alias-label-primary)}
+.dsm-trash-date{font-size:11px;color:var(--dsw-alias-label-tertiary);flex:none;white-space:nowrap}
+.dsm-trash-actions{display:flex;gap:6px;flex:none}
+.dsm-trash-empty{font-size:12px;color:var(--dsw-alias-label-tertiary);padding:6px 2px}
+`
+
+// Shared status-dot state so the ⋯-menu "标记未读" action can toggle the
+// manual flag and trigger a repaint without coupling the two installers.
+const DSM_KEY_MANUAL = 'dsm-manual-unread-v1'
+let dsmManualUnread = null
+let dsmRepaintDots = null
+function dsmLoadManual() {
+  if (dsmManualUnread) return dsmManualUnread
+  try { dsmManualUnread = new Set(JSON.parse(localStorage.getItem(DSM_KEY_MANUAL) || '[]')) } catch (e) { dsmManualUnread = new Set() }
+  return dsmManualUnread
+}
+function dsmSaveManual() { try { localStorage.setItem(DSM_KEY_MANUAL, JSON.stringify([...dsmLoadManual()])) } catch (e) {} }
+function dsmToggleManual(id) {
+  const s = dsmLoadManual()
+  if (s.has(id)) s.delete(id); else s.add(id)
+  dsmSaveManual()
+  if (dsmRepaintDots) dsmRepaintDots()
+}
+
+// Recycle-bin membership (session ids currently in 回收站). The sidebar
+// status-dot installer uses this to hide trashed sessions so they don't show
+// up under DSH's "未分组" group. Loaded from the backend on a throttle and
+// updated optimistically when our own ⋯-menu deletes a session.
+let dsmTrashIds = null
+let dsmTrashTick = 0
+async function dsmLoadTrashIds() {
+  try {
+    const r = await postJSON('/archived-sessions/trash/list', {})
+    const items = (r && r.items) || []
+    dsmTrashIds = new Set(items.map((t) => String(t.sessionId)))
+  } catch (e) { /* keep last known set */ }
+  return dsmTrashIds
+}
+
+// Permanently-hidden set: sessions the user hard-purged from the 回收站. Unlike
+// dsmTrashIds (which the backend poll refreshes and can drop), these are GONE for
+// good, so we keep them hidden forever — otherwise DSH re-surfaces the orphan
+// under a "未分组" group after the trash poll drops it from dsmTrashIds.
+const DSM_KEY_PURGED = 'dsm-purged-v1'
+let dsmPurgedIds = null
+function dsmLoadPurged() {
+  if (dsmPurgedIds) return dsmPurgedIds
+  try { dsmPurgedIds = new Set(JSON.parse(localStorage.getItem(DSM_KEY_PURGED) || '[]')) } catch (e) { dsmPurgedIds = new Set() }
+  return dsmPurgedIds
+}
+function dsmSavePurged() { try { localStorage.setItem(DSM_KEY_PURGED, JSON.stringify([...dsmLoadPurged()])) } catch (e) {} }
+function dsmMarkPurged(ids) {
+  const s = dsmLoadPurged()
+  ids.forEach((id) => s.add(String(id)))
+  dsmSavePurged()
+  if (dsmRepaintDots) dsmRepaintDots()
+}
+
+function installSidebarSessionMenuAug() {
+  if (typeof document === 'undefined') return
+  const AUG = 'data-dsm-aug'
+  let styleInjected = false
+  let activeSubClose = null
+  let hoverTimer = null
+
+  const findFiber = (el) => {
+    const k = Object.keys(el).find((kk) => kk.startsWith('__reactFiber') || kk.startsWith('__reactInternalInstance'))
+    return k ? el[k] : null
+  }
+  // Walk the React fiber chain from the portalled menu element up to the
+  // SessionNodeItem component, which carries `node.id` (the session id).
+  const sessionInfoFromMenu = (menuEl) => {
+    let f = findFiber(menuEl)
+    let guard = 0
+    while (f && guard++ < 300) {
+      const p = f.memoizedProps
+      if (p && p.node && typeof p.node.id === 'string' && p.node.id) {
+        return { id: p.node.id, cwd: p.node.cwd || p.node.workspacePath || null }
+      }
+      f = f.return
+    }
+    return null
+  }
+  const closeMenu = () => {
+    try { document.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })) } catch (e) {}
+    try { document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })) } catch (e) {}
+  }
+  const escapeHtml = (s) => {
+    const d = document.createElement('div')
+    d.textContent = s == null ? '' : String(s)
+    return d.innerHTML
+  }
+  const toast = (msg) => {
+    const t = document.createElement('div')
+    t.className = 'dsm-toast'
+    t.textContent = msg
+    document.body.appendChild(t)
+    setTimeout(() => t.remove(), 2600)
+  }
+  const ensureStyle = () => {
+    if (styleInjected) return
+    const s = document.createElement('style')
+    s.dataset.dsm = 'aug'
+    s.textContent = SIDEBAR_AUG_CSS
+    document.head.appendChild(s)
+    styleInjected = true
+  }
+  const closeMoveSubmenu = () => {
+    if (activeSubClose) { const f = activeSubClose; activeSubClose = null; f() }
+  }
+  const openMoveSubmenu = (moveBtn, info) => {
+    ensureStyle()
+    closeMoveSubmenu()
+    const sub = document.createElement('div')
+    sub.className = 'dsm-sub'
+    sub.setAttribute('role', 'menu')
+    sub.setAttribute('data-dsm-sub', '')
+    sub.innerHTML = '<div class="dsm-sub-loading">加载工作区…</div>'
+    const r = moveBtn.getBoundingClientRect()
+    sub.style.top = Math.max(8, Math.round(r.top - 4)) + 'px'
+    sub.style.left = Math.round(r.right + 10) + 'px'
+    document.body.appendChild(sub)
+    const closeSub = () => {
+      activeSubClose = null
+      if (sub.parentNode) sub.remove()
+      document.removeEventListener('mousedown', onDocDown, true)
+      window.removeEventListener('blur', closeSub)
+    }
+    const onDocDown = (e) => {
+      if (sub.contains(e.target) || moveBtn.contains(e.target)) return
+      closeSub()
+    }
+    // Keep DSH's own outside-click handler from closing the parent menu while
+    // the pointer is over our submenu (it lives outside the portalled card).
+    sub.addEventListener('mousedown', (e) => e.stopPropagation())
+    // Hover bridging: moving from the trigger button across the 10px gap to
+    // the submenu must not dismiss it; entering the submenu cancels the
+    // pending close timer set on the button's mouseleave.
+    sub.addEventListener('mouseenter', () => { if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null } })
+    sub.addEventListener('mouseleave', () => { hoverTimer = setTimeout(() => closeSub(), 160) })
+    setTimeout(() => document.addEventListener('mousedown', onDocDown, true), 0)
+    window.addEventListener('blur', closeSub)
+    activeSubClose = closeSub
+    Promise.all([
+      postJSON('/archived-sessions/workspaces', {}),
+      postJSON('/archived-sessions/sessions', {}),
+    ]).then(([ws, sess]) => {
+      const items = ws.items || []
+      const cur = (sess.items || []).find((x) => x.sessionId === info.id)
+      const curPath = cur ? cur.workspacePath : (info.cwd || null)
+      if (!items.length) { sub.innerHTML = '<div class="dsm-sub-empty">（暂无可用工作区）</div>'; return }
+      sub.innerHTML = ''
+      items.forEach((w) => {
+        const isCur = !!curPath && w.path === curPath
+        const b = document.createElement('button')
+        b.type = 'button'
+        b.className = 'dsm-sub-item'
+        b.setAttribute('role', 'menuitem')
+        b.disabled = isCur
+        const name = document.createElement('span')
+        name.className = 'dsm-sub-name'
+        name.textContent = w.title || pathName(w.path) || w.workspaceId
+        b.appendChild(name)
+        if (isCur) {
+          const c = document.createElement('span')
+          c.className = 'dsm-sub-cur'
+          c.textContent = '当前'
+          b.appendChild(c)
+        }
+        b.addEventListener('click', (e) => {
+          e.stopPropagation()
+          e.preventDefault()
+          closeSub()
+          closeMenu()
+          postJSON('/archived-sessions/move', { sessionId: info.id, targetPath: w.path })
+            .then(() => toast('移动成功'))
+            .catch((ee) => toast('移动失败：' + String((ee && ee.message) || ee)))
+        })
+        sub.appendChild(b)
+      })
+    }).catch((e) => {
+      sub.innerHTML = '<div class="dsm-sub-err">' + escapeHtml(String((e && e.message) || e)) + '</div>'
+    })
+  }
+  const openDeleteConfirm = (id) => {
+    ensureStyle()
+    const backdrop = document.createElement('div')
+    backdrop.className = 'dsm-backdrop'
+    const dlg = document.createElement('div')
+    dlg.className = 'dsm-dlg'
+    dlg.innerHTML = '<h3 class="dsm-title">删除会话</h3><p class="dsm-text">确认将该会话移入回收站？可在「设置 → 会话管理 → 回收站」中恢复或彻底删除。</p><div class="dsm-actions"><button type="button" class="dsm-btn" data-role="cancel">取消</button><button type="button" class="dsm-btn dsm-del" data-role="ok">移入回收站</button></div>'
+    backdrop.appendChild(dlg)
+    document.body.appendChild(backdrop)
+    const close = () => backdrop.remove()
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close() })
+    dlg.querySelector('[data-role=cancel]').addEventListener('click', close)
+    dlg.querySelector('[data-role=ok]').addEventListener('click', () => {
+      close()
+      postJSON('/archived-sessions/delete', { sessionId: id })
+        .then(() => {
+          if (dsmTrashIds) dsmTrashIds.add(String(id))
+          if (dsmRepaintDots) dsmRepaintDots()
+          toast('已移入回收站')
+        })
+        .catch((e) => toast('删除失败：' + String((e && e.message) || e)))
+    })
+  }
+  const augmentMenu = (menuEl, info) => {
+    if (menuEl.querySelector('[' + AUG + ']')) return
+    const viewport = menuEl.querySelector('[role="presentation"]') || menuEl.firstElementChild
+    if (!viewport) return
+    const proto = menuEl.querySelector('[role="menuitem"]')
+    if (!proto) return
+    const protoWrap = proto.parentElement
+    const protoCls = proto.className
+    const protoWrapCls = protoWrap ? protoWrap.className : ''
+    const ICON_MOVE = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v4"/><path d="M10 13l2 2 2-2"/></svg>'
+    const ICON_DEL = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/><path d="M9 7V4h6v3"/></svg>'
+    const ICON_UNREAD = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg>'
+    const mk = (label, svg, danger) => {
+      const wrap = protoWrap ? protoWrap.cloneNode(false) : document.createElement('div')
+      if (protoWrapCls) wrap.className = protoWrapCls
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.setAttribute('role', 'menuitem')
+      btn.className = protoCls // same `.item` class DSH uses → identical layout/alignment
+      const icon = document.createElement('span')
+      icon.style.cssText = 'display:inline-flex;flex:none;width:16px;height:16px;align-items:center;justify-content:center;color:' + (danger ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-label-tertiary)')
+      icon.innerHTML = svg
+      const lab = document.createElement('span')
+      lab.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+      lab.textContent = label
+      btn.appendChild(icon)
+      btn.appendChild(lab)
+      if (danger) btn.style.color = 'var(--dsw-alias-state-error-primary)'
+      btn.setAttribute(AUG, '')
+      wrap.appendChild(btn)
+      return { wrap, btn }
+    }
+    const move = mk('移动会话', ICON_MOVE, false)
+    const del = mk('删除会话', ICON_DEL, true)
+    const mark = mk(dsmLoadManual().has(info.id) ? '标记已读' : '标记未读', ICON_UNREAD, false)
+    if (mark.btn.firstChild) mark.btn.firstChild.style.color = 'var(--dsw-alias-state-business-primary)'
+    const chev = document.createElement('span')
+    chev.style.cssText = 'margin-left:auto;flex:none;color:var(--dsw-alias-label-tertiary);font-size:14px;line-height:1'
+    chev.textContent = '›'
+    move.btn.appendChild(chev)
+    move.btn.addEventListener('mouseenter', () => {
+      if (!document.querySelector('[data-dsm-sub]')) openMoveSubmenu(move.btn, info)
+    })
+    move.btn.addEventListener('mouseleave', () => {
+      hoverTimer = setTimeout(() => closeMoveSubmenu(), 160)
+    })
+    move.btn.addEventListener('click', (e) => { e.stopPropagation(); e.preventDefault() })
+    del.btn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      e.preventDefault()
+      closeMoveSubmenu()
+      openDeleteConfirm(info.id)
+    })
+    mark.btn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      e.preventDefault()
+      closeMoveSubmenu()
+      dsmToggleManual(info.id)
+      closeMenu()
+    })
+    viewport.appendChild(move.wrap)
+    viewport.appendChild(del.wrap)
+    // 标记未读 goes to the very top of the menu (above DSH's native items).
+    viewport.insertBefore(mark.wrap, viewport.firstElementChild)
+  }
+
+  const seen = new WeakSet()
+  const obs = new MutationObserver(() => {
+    const menus = document.querySelectorAll('body > [role="menu"]')
+    menus.forEach((menuEl) => {
+      if (seen.has(menuEl)) return
+      const info = sessionInfoFromMenu(menuEl)
+      if (!info) return // not a session menu (e.g. settings / header dropdown)
+      seen.add(menuEl)
+      try { augmentMenu(menuEl, info) } catch (e) { /* best-effort DOM shim */ }
+    })
+  })
+  obs.observe(document.body, { childList: true, subtree: false })
+}
+
+// Left-side per-session status dot (DOM shim). The color is driven by DSH's
+// REAL session status, read from the row's own StateDot ([data-state]):
+//   手动标记未读（蓝） = 用户在 ⋯ 菜单或点击圆点手动标记，localStorage 持久化（最高优先级）
+//   工作中（黄）       = DSH state 'ongoing'
+//   需用户反馈（琥珀） = DSH state 'warning'（有追问需用户反馈）
+//   完成后未读（绿）   = DSH state 'done' 且用户尚未读过（read 集合）
+//   完成已读（不显示） = DSH state 'done' 且已读过（read 集合持久化）
+// 手动未读集合 + read 集合均持久化于 localStorage；打开过即记入 read，绿点不再出现。
+// 另外：进入回收站的会话会整行隐藏（不出现在「未分组」里）。
+function installSidebarStatusDots() {
+  if (typeof document === 'undefined') return
+  const DOT = 'data-dsm-dot'
+  const KEY_READ = 'dsm-read-v1'
+  if (!document.querySelector('style[data-dsm=aug]')) {
+    const s = document.createElement('style')
+    s.dataset.dsm = 'aug'
+    s.textContent = SIDEBAR_AUG_CSS
+    document.head.appendChild(s)
+  }
+  const findFiber = (el) => {
+    const k = Object.keys(el).find((kk) => kk.startsWith('__reactFiber') || kk.startsWith('__reactInternalInstance'))
+    return k ? el[k] : null
+  }
+  const fiberProp = (el, pred) => {
+    let f = findFiber(el)
+    let g = 0
+    while (f && g++ < 300) {
+      const p = f.memoizedProps
+      if (p && pred(p)) return pred(p)
+      f = f.return
+    }
+    return null
+  }
+  const rowId = (row) => fiberProp(row, (p) => (p.node && typeof p.node.id === 'string' && p.node.id ? p.node.id : null))
+  const loadRead = () => { try { return new Set(JSON.parse(localStorage.getItem(KEY_READ) || '[]')) } catch (e) { return new Set() } }
+  const saveRead = (s) => { try { localStorage.setItem(KEY_READ, JSON.stringify([...s])) } catch (e) {} }
+  const read = loadRead()
+  let curActive = null
+  const activeRowId = () => {
+    const sel = document.querySelector('[role="treeitem"][aria-selected="true"]')
+    return sel ? rowId(sel) : null
+  }
+  // Dot colors per the user's scheme. We read DSH's REAL session status from the
+  // row's own StateDot (its [data-state] attr) and recolor it:
+  //   ongoing  → 黄  工作中(running)
+  //   warning  → 琥珀 有追问需用户反馈
+  //   done     → 绿  完成后未读（读过则不再显示）
+  //   error    → 红  出错/需关注（与 DSH 自带 StateDot 一致）
+  //   (manual  → 蓝  手动标记未读，最高优先级)
+  const COLOR = {
+    manual: 'var(--dsw-alias-state-business-primary)',        // 蓝 手动标记未读
+    running: '#EAB308',                                       // 黄 工作中 (DSH ongoing)
+    feedback: 'var(--dsw-alias-state-warning-primary)',       // 琥珀 需用户反馈 (DSH warning)
+    done: 'var(--dsw-alias-state-success-primary)',           // 绿 完成后未读 (DSH done)
+    error: 'var(--dsw-alias-state-error-primary)',            // 红 出错/需关注 (DSH error)
+  }
+  const manualUnread = dsmLoadManual()
+  const paint = () => {
+    // Recompute the active session on every paint so the active row is never
+    // shown from a stale `curActive` (the click that changes aria-selected
+    // mutates the DOM and triggers paint immediately, before the 1.2s tick()
+    // would have run — without this, the clicked session flashed green).
+    const activeId = activeRowId()
+    if (activeId) { read.add(activeId); saveRead() }
+    // Clicking into a manually-marked session auto-clears the manual unread
+    // flag (it becomes read on open) — only on the active transition, so a
+    // flag set while already viewing it isn't wiped until you re-enter it.
+    if (activeId !== curActive && activeId && manualUnread.has(activeId)) {
+      manualUnread.delete(activeId)
+      dsmSaveManual()
+    }
+    curActive = activeId
+    const rows = document.querySelectorAll('[role="treeitem"]')
+    rows.forEach((row) => {
+      const id = rowId(row)
+      if (!id) return
+      // Trashed sessions belong in 回收站, not the sidebar (DSH would group
+      // them under "未分组"). Hide the row entirely and skip its dot. So do
+      // hard-purged sessions — they're gone for good and must never resurface
+      // (otherwise DSH re-renders the orphan under a "未分组" group).
+      const purged = dsmLoadPurged()
+      if ((dsmTrashIds && dsmTrashIds.has(id)) || purged.has(id)) {
+        if (row.style.display !== 'none') row.style.display = 'none'
+        const d = row.querySelector('[' + DOT + ']'); if (d) d.remove()
+        return
+      }
+      if (row.style.display === 'none') row.style.display = ''
+      // Read DSH's REAL session status from the row's own StateDot and recolor
+      // it with the user's scheme (we also hide DSH's dot so only ours shows).
+      const sd = row.querySelector('[data-state]')
+      if (sd) sd.style.display = 'none'
+      let dot = row.querySelector('[' + DOT + ']')
+      let color = null
+      if (manualUnread.has(id)) color = COLOR.manual
+      else if (sd) {
+        const st = sd.getAttribute('data-state')
+        if (st === 'ongoing') color = COLOR.running
+        else if (st === 'warning') color = COLOR.feedback
+        else if (st === 'error') color = COLOR.error
+        else if (st === 'done') color = read.has(id) ? null : COLOR.done
+      }
+      if (!color) { if (dot) dot.remove(); return }
+      if (!dot) {
+        dot = document.createElement('span')
+        dot.setAttribute(DOT, '')
+        dot.className = 'dsm-dot'
+        if (!row.hasAttribute('data-dsm-pos')) {
+          if (getComputedStyle(row).position === 'static') row.style.position = 'relative'
+          row.setAttribute('data-dsm-pos', '')
+        }
+        dot.addEventListener('click', (e) => {
+          e.stopPropagation(); e.preventDefault()
+          dsmToggleManual(id)
+        })
+        row.insertBefore(dot, row.firstChild)
+      }
+      dot.style.background = color
+    })
+  }
+  dsmRepaintDots = paint
+  const tick = () => { if (++dsmTrashTick % 3 === 0) dsmLoadTrashIds(); paint() }
+  let raf = 0
+  const schedulePaint = () => { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; paint() }) }
+  tick()
+  dsmLoadTrashIds()
+  paint()
+  const obs = new MutationObserver(schedulePaint)
+  obs.observe(document.body, { childList: true, subtree: true })
+  setInterval(tick, 1200)
+}
+
 export function apply(ctx) {
   installSettingsNavIcons(ctx)
+  installSidebarSessionMenuAug()
+  installSidebarStatusDots()
   const workspacesSvc = ctx.get('workspaces')
   ctx.slots.inject('settings.section', () =>
     ctx.slots.register(
