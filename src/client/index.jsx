@@ -437,7 +437,7 @@ function SessionPanel({ workspacesSvc }) {
           ['details', openDetails === it.sessionId ? '收起详情' : '详情'],
           ['delete', '删除'],
         ]
-      : [['archive', '归档'], ['move', '移动'], ['details', '详情']]
+      : [['archive', '归档'], ['move', '移动'], ['details', '详情'], ['delete', '删除']]
     return (
       <div ref={openMenu === it.sessionId ? menuRef : null} className="more-wrap">
         <button
