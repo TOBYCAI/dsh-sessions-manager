@@ -1039,7 +1039,6 @@ function installSidebarSessionMenuAug() {
 function installSidebarStatusDots() {
   if (typeof document === 'undefined') return
   const DOT = 'data-dsm-dot'
-  const KEY_READ = 'dsm-read-v1'
   if (!document.querySelector('style[data-dsm=aug]')) {
     const s = document.createElement('style')
     s.dataset.dsm = 'aug'
@@ -1061,9 +1060,6 @@ function installSidebarStatusDots() {
     return null
   }
   const rowId = (row) => fiberProp(row, (p) => (p.node && typeof p.node.id === 'string' && p.node.id ? p.node.id : null))
-  const loadRead = () => { try { return new Set(JSON.parse(localStorage.getItem(KEY_READ) || '[]')) } catch (e) { return new Set() } }
-  const saveRead = (s) => { try { localStorage.setItem(KEY_READ, JSON.stringify([...s])) } catch (e) {} }
-  const read = loadRead()
   let curActive = null
   const activeRowId = () => {
     const sel = document.querySelector('[role="treeitem"][aria-selected="true"]')
@@ -1090,7 +1086,6 @@ function installSidebarStatusDots() {
     // mutates the DOM and triggers paint immediately, before the 1.2s tick()
     // would have run — without this, the clicked session flashed green).
     const activeId = activeRowId()
-    if (activeId) { read.add(activeId); saveRead() }
     // Clicking into a manually-marked session auto-clears the manual unread
     // flag (it becomes read on open) — only on the active transition, so a
     // flag set while already viewing it isn't wiped until you re-enter it.
@@ -1123,10 +1118,10 @@ function installSidebarStatusDots() {
       if (manualUnread.has(id)) color = COLOR.manual
       else if (sd) {
         const st = sd.getAttribute('data-state')
-        if (st === 'ongoing') color = COLOR.running
+        if (st === 'running') color = COLOR.running
         else if (st === 'warning') color = COLOR.feedback
         else if (st === 'error') color = COLOR.error
-        else if (st === 'done') color = read.has(id) ? null : COLOR.done
+        else if (st === 'done') color = (activeId === id) ? null : COLOR.done
       }
       if (!color) { if (dot) dot.remove(); return }
       if (!dot) {
