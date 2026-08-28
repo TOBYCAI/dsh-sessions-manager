@@ -7,7 +7,7 @@
 // (workspaceRegistry + storageDomain), folds titles/dates/workspace tags from
 // session persistence, physically removes a session's log file on delete, and
 // relocates a conversation (session) between workspaces on move.
-import { mkdir, realpath, rename, stat, unlink } from 'node:fs/promises'
+import { mkdir, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { readFileSync, writeFileSync } from 'node:fs'
 import zlib from 'node:zlib'
@@ -18,8 +18,10 @@ export const inject = ['webServer', 'workspaceRegistry', 'sessionPersistence', '
 
 const MAX_TITLE = 80
 // Recycle bin (回收站): normal deletes land here instead of being erased.
-const TRASH_DIR = join(homedir(), '.dsh', 'sessions-manager-trash')
+const TRASH_DIR = process.env.DSH_SESSIONS_MANAGER_TRASH_DIR || join(homedir(), '.dsh', 'sessions-manager-trash')
 const TRASH_INDEX = join(TRASH_DIR, 'index.json')
+const TRASH_SCHEMA_VERSION = 2
+const DEFAULT_TRASH_SETTINGS = Object.freeze({ retentionDays: 0 })
 // -- per-session detail aggregation (v2.0: 取 Zephyr-vibe buildDetails 精华) --
 // 识别“搜索/抓取”类工具，用来收集 fetch 记录。
 const FETCH_TOOL_RE = /search|fetch|download|browse/i
@@ -29,6 +31,10 @@ const MAX_FILES = 20     // write/edit 文件列表上限
 function json(res, value, status = 200) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
   res.end(JSON.stringify(value))
+}
+
+function errorStatus(error) {
+  return error && Number.isInteger(error.status) ? error.status : 500
 }
 
 async function readJsonBody(req) {
@@ -50,8 +56,21 @@ function parseIds(body) {
   const raw = body && body.sessionIds
   if (!Array.isArray(raw)) return null
   const ids = []
-  for (const v of raw) if (typeof v === 'string' && v) ids.push(v)
+  for (const v of raw) if (typeof v === 'string' && isSafeSessionId(v)) ids.push(v)
   return ids
+}
+
+function isSafeSessionId(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 200 && !/[\\/\0]/.test(value) && value !== '.' && value !== '..'
+}
+
+function requireSessionId(value) {
+  if (!isSafeSessionId(value)) {
+    const error = new Error('无效的 sessionId')
+    error.status = 400
+    throw error
+  }
+  return value
 }
 
 // Best-effort: figure out which conversation is the host's *currently active*
@@ -97,6 +116,8 @@ export function apply(ctx) {
   const sp = ctx.sessionPersistence
   const sq = ctx.sessionQuery
   const dom = () => ctx.storageDomain.get('workspace')
+  const authorityTitleCache = new Map()
+  let authorityTitlesLoaded = false
 
   async function archivedState() {
     const d = dom()
@@ -113,6 +134,19 @@ export function apply(ctx) {
     // Keep the registry's in-memory cache in sync so the live sidebar refreshes.
     if (w && 'state' in w) { try { w.state = next } catch (e) { /* best-effort */ } }
     return next
+  }
+
+  let archiveMutation = Promise.resolve()
+  function mutateArchived(mutator) {
+    const operation = archiveMutation.then(async () => {
+      const state = await archivedState()
+      const list = (state.archivedSessionIds || []).map(String)
+      const result = await mutator(list)
+      if (result.next) await writeArchived(result.next)
+      return result.value
+    })
+    archiveMutation = operation.catch(() => {})
+    return operation
   }
 
   let wsByPath = {}
@@ -152,21 +186,44 @@ export function apply(ctx) {
 
   // Restore (unarchive) one session; throws on failure.
   async function restoreOne(sid) {
-    const state = await archivedState()
-    const list = state.archivedSessionIds.map(String)
-    if (!list.includes(sid)) return { ok: true, restored: false }
-    await writeArchived(list.filter((x) => x !== sid))
-    return { ok: true, restored: true }
+    requireSessionId(sid)
+    return mutateArchived((list) => list.includes(sid)
+      ? { next: list.filter((x) => x !== sid), value: { ok: true, restored: true } }
+      : { next: null, value: { ok: true, restored: false } })
   }
 
   // ---- Recycle bin (回收站) helpers ----------------------------------------
-  const trashPathFor = (sid) => join(TRASH_DIR, sid + '.jsonl')
-  async function readTrash() {
-    try { return JSON.parse(readFileSync(TRASH_INDEX, 'utf8')) || [] } catch (e) { return [] }
+  let trashMutation = Promise.resolve()
+  function normalizeTrashStore(raw) {
+    if (Array.isArray(raw)) return { schemaVersion: TRASH_SCHEMA_VERSION, settings: { ...DEFAULT_TRASH_SETTINGS }, items: raw, purgedSessionIds: [] }
+    const settings = raw && typeof raw.settings === 'object' ? raw.settings : {}
+    const retentionDays = Number.isInteger(settings.retentionDays) && settings.retentionDays >= 0 ? settings.retentionDays : 0
+    return {
+      schemaVersion: TRASH_SCHEMA_VERSION,
+      settings: { retentionDays },
+      items: raw && Array.isArray(raw.items) ? raw.items : [],
+      purgedSessionIds: raw && Array.isArray(raw.purgedSessionIds) ? [...new Set(raw.purgedSessionIds.filter(isSafeSessionId).map(String))] : [],
+    }
   }
-  async function writeTrash(list) {
+  async function readTrashStore() {
+    try { return normalizeTrashStore(JSON.parse(readFileSync(TRASH_INDEX, 'utf8'))) } catch (e) { return normalizeTrashStore(null) }
+  }
+  async function readTrash() { return (await readTrashStore()).items }
+  async function writeTrashStore(store) {
     await mkdir(TRASH_DIR, { recursive: true })
-    writeFileSync(TRASH_INDEX, JSON.stringify(list, null, 2))
+    const tmp = join(TRASH_DIR, `.index-${process.pid}-${Date.now()}.tmp`)
+    await writeFile(tmp, JSON.stringify(normalizeTrashStore(store), null, 2), { encoding: 'utf8', mode: 0o600 })
+    await rename(tmp, TRASH_INDEX)
+  }
+  function mutateTrash(mutator) {
+    const operation = trashMutation.then(async () => {
+      const store = await readTrashStore()
+      const result = await mutator(store)
+      await writeTrashStore(store)
+      return result
+    })
+    trashMutation = operation.catch(() => {})
+    return operation
   }
 
   // Soft-delete one session: record it in the recycle-bin index but KEEP its
@@ -175,6 +232,7 @@ export function apply(ctx) {
   // made restore land in 未分组 instead of the original workspace — so we leave
   // the file where it is and let the sidebar DOM shim hide the row instead.
   async function deleteOne(sid) {
+    requireSessionId(sid)
     // Soft-delete is always allowed — including the currently-active conversation.
     // The log file stays in its original workspace dir (recorded in the 回收站
     // index below), so the live session is unaffected and the entry stays
@@ -199,19 +257,24 @@ export function apply(ctx) {
       }
     } catch (e) { /* best-effort */ }
     // Record in the trash index only — the log stays in its workspace dir.
-    const list = await readTrash()
-    const entry = {
-      sessionId: sid,
-      title: title || cwd || sid,
-      cwd: cwd || null,
-      header: header || null,
-      originalPath: removedPath || null,
-      deletedAt: Date.now(),
+    if (!header && !removedPath) {
+      const error = new Error('找不到该会话')
+      error.status = 404
+      throw error
     }
-    const next = list.some((t) => t.sessionId === sid)
-      ? list.map((t) => (t.sessionId === sid ? entry : t))
-      : list.concat(entry)
-    await writeTrash(next)
+    const archived = await mutateArchived((list) => ({ next: null, value: list.includes(sid) })).catch(() => false)
+    await mutateTrash((store) => {
+      const entry = {
+        sessionId: sid, title: title || cwd || sid, cwd: cwd || null,
+        header: header || null, originalPath: removedPath || null,
+        sizeBytes: header && typeof header.size === 'number' ? header.size : null,
+        wasArchived: archived, deletedAt: Date.now(),
+      }
+      const at = store.items.findIndex((t) => String(t.sessionId) === sid)
+      if (at >= 0) store.items[at] = entry
+      else store.items.push(entry)
+      store.purgedSessionIds = store.purgedSessionIds.filter((id) => id !== sid)
+    })
     return { ok: true, trashed: true }
   }
 
@@ -219,29 +282,112 @@ export function apply(ctx) {
   // so we just drop it from the recycle-bin index and the sidebar reveals it in
   // its original workspace (no move / no re-attach needed).
   async function restoreFromTrash(sid) {
-    const list = await readTrash()
-    const entry = list.find((t) => t.sessionId === sid)
-    if (!entry) throw new Error('回收站中找不到该会话')
-    await writeTrash(list.filter((t) => t.sessionId !== sid))
+    requireSessionId(sid)
+    await mutateTrash(async (store) => {
+      const entry = store.items.find((t) => String(t.sessionId) === sid)
+      if (!entry) { const error = new Error('回收站中找不到该会话'); error.status = 404; throw error }
+      // Restore the pre-delete archive state before removing the durable trash
+      // entry. If this fails, mutateTrash does not write and the item remains
+      // recoverable instead of disappearing into an inconsistent state.
+      if (entry.wasArchived === false) await restoreOne(sid)
+      store.items = store.items.filter((t) => String(t.sessionId) !== sid)
+      store.purgedSessionIds = store.purgedSessionIds.filter((id) => id !== sid)
+    })
     return { ok: true, restored: true }
   }
 
   // Permanently erase a trashed session: physically delete its log (still in
   // the original workspace dir) and detach it from any workspace so DSH drops it.
   async function purgeFromTrash(sid) {
-    const list = await readTrash()
-    const entry = list.find((t) => t.sessionId === sid)
-    if (entry) {
-      const target = entry.originalPath || (entry.cwd ? join(entry.cwd, sid + '.jsonl') : null)
+    requireSessionId(sid)
+    let purged = false
+    await mutateTrash(async (store) => {
+      const entry = store.items.find((t) => String(t.sessionId) === sid)
+      if (!entry) { const error = new Error('回收站中找不到该会话'); error.status = 404; throw error }
+      let target = null
+      try {
+        const headers = await sp.list()
+        const current = headers.find((h) => String(h.id) === sid)
+        const located = current && sp.locate(current)
+        if (located && typeof located.path === 'string') target = located.path
+      } catch (e) {}
+      if (!target && typeof entry.originalPath === 'string') target = entry.originalPath
+      // JSONL persistence stores logs as
+      //   .../<sessionId>/session.jsonl.zstd
+      // Older backends may instead include the id in the filename itself.
+      // Accept both layouts, but reject every unrelated path before unlink.
+      const targetOwnsSession = target && (basename(dirname(target)) === sid || basename(target).includes(sid))
+      if (target && !targetOwnsSession) {
+        const error = new Error('日志路径与会话 ID 不匹配，已停止永久删除')
+        error.status = 409
+        throw error
+      }
+      // Persist the tombstone before any irreversible work. A crash after this
+      // point may leave the trash item retryable, but can never resurrect the
+      // session in a later list baseline.
+      if (!store.purgedSessionIds.includes(sid)) store.purgedSessionIds.push(sid)
+      await writeTrashStore(store)
+      // A freshly-created or recently-opened Session can remain resident after
+      // its file is unlinked. Flush once, then use SessionStore's entered-record
+      // detach capability so DSH emits host/session-removed and the client list
+      // drops the row instead of resurrecting it from live memory.
+      try {
+        const sessions = ctx.get('sessions')
+        const liveSession = sessions && sessions.get && sessions.get(sid)
+        if (liveSession && typeof sessions.flush === 'function') await sessions.flush(liveSession)
+        const entered = sessions && sessions.store && sessions.store.get && sessions.store.get(sid)
+        if (liveSession && (!entered || typeof entered.detach !== 'function')) throw new Error('宿主未提供 live Session detach 能力')
+        if (entered && typeof entered.detach === 'function') entered.detach()
+        // session/disposed starts an asynchronous persistence retirement. Wait
+        // for it before unlinking, otherwise its final drain can race the file
+        // deletion and briefly (or permanently) republish an orphan that the
+        // official sidebar groups under “未分组”.
+        const retirement = sp && sp.retirements && sp.retirements.get && sp.retirements.get(sid)
+        if (retirement && typeof retirement.then === 'function') await retirement
+      } catch (e) {
+        const error = new Error('无法从宿主内存移除会话，已停止永久删除：' + String((e && e.message) || e))
+        error.status = 409
+        throw error
+      }
       if (target) {
         try { await unlink(target) } catch (e) { if (e && e.code !== 'ENOENT') throw new Error('删除文件失败：' + String((e && e.message) || e)) }
       }
       try { for (const ent of w.list()) { if (ent.sessionIds.includes(sid)) { try { await ent.detachSession(sid) } catch (e) {} } } } catch (e) {}
       try { if (w.sessionPaths && w.sessionPaths.delete) w.sessionPaths.delete(sid) } catch (e) {}
       try { if (w.headers && w.headers.delete) w.headers.delete(sid) } catch (e) {}
-    }
-    await writeTrash(list.filter((t) => t.sessionId !== sid))
+      await restoreOne(sid)
+      // Rebuild from the post-unlink disk baseline before reporting success.
+      // Merely deleting the two Maps above does not notify/rebuild Workspace
+      // entities, leaving the client with an orphaned “未分组” snapshot.
+      try { await reindexRegistry() } catch (e) { /* tombstone still prevents resurrection */ }
+      store.items = store.items.filter((t) => String(t.sessionId) !== sid)
+      purged = true
+    })
+    if (!purged) throw new Error('彻底删除失败')
     return { ok: true, purged: true }
+  }
+
+  async function trashSettings(next) {
+    if (next === undefined) return (await readTrashStore()).settings
+    const days = Number(next.retentionDays)
+    if (!Number.isInteger(days) || ![0, 7, 30, 90].includes(days)) {
+      const error = new Error('retentionDays 仅支持 0、7、30、90')
+      error.status = 400
+      throw error
+    }
+    await mutateTrash((store) => { store.settings = { retentionDays: days } })
+    return (await readTrashStore()).settings
+  }
+
+  async function cleanupExpiredTrash() {
+    const store = await readTrashStore()
+    const days = store.settings.retentionDays
+    if (!days) return 0
+    const cutoff = Date.now() - days * 86400000
+    const ids = store.items.filter((item) => Number(item.deletedAt) > 0 && Number(item.deletedAt) < cutoff).map((item) => String(item.sessionId))
+    let count = 0
+    for (const sid of ids) { try { await purgeFromTrash(sid); count++ } catch (e) {} }
+    return count
   }
 
   // ---- "move conversation between workspaces" helper -----------------------
@@ -509,11 +655,14 @@ export function apply(ctx) {
   // is dropped out of the sidebar. DSH requires the session to exist (live or
   // persisted) — a genuine miss surfaces as an error.
   async function archiveOne(sid) {
-    const state = await archivedState()
-    const list = state.archivedSessionIds.map(String)
-    if (list.includes(sid)) return { ok: true, archived: false }
-    await w.archiveSession(sid)
-    return { ok: true, archived: true }
+    requireSessionId(sid)
+    return mutateArchived(async (list) => {
+      if (list.includes(sid)) return { next: null, value: { ok: true, archived: false } }
+      await w.archiveSession(sid)
+      // archiveSession owns the durable write; keep this operation serialized
+      // with restoreOne so two requests cannot overwrite each other's state.
+      return { next: null, value: { ok: true, archived: true } }
+    })
   }
 
   async function allSessionItems() {
@@ -528,9 +677,12 @@ export function apply(ctx) {
     if (live) { try { live.list().forEach((s) => { if (!ids.includes(String(s.id))) ids.push(String(s.id)) }) } catch (e) { /* ignore */ } }
     // Exclude sessions already moved to the recycle bin (软删除): they live in
     // 回收站, not in 会话管理, so the panel won't re-list them after a delete.
-    let trashedIds = new Set()
-    try { trashedIds = new Set((await readTrash()).map((t) => String(t.sessionId))) } catch (e) {}
-    const visibleIds = ids.filter((id) => !trashedIds.has(id))
+    let hiddenIds = new Set()
+    try {
+      const store = await readTrashStore()
+      hiddenIds = new Set([...store.items.map((t) => String(t.sessionId)), ...store.purgedSessionIds.map(String)])
+    } catch (e) {}
+    const visibleIds = ids.filter((id) => !hiddenIds.has(id))
     wsByPath = {}
     try { for (const ent of w.list()) wsByPath[ent.path] = ent } catch (e) { wsByPath = {} }
     const currentArchived = new Set((await archivedState().catch(() => ({ archivedSessionIds: [] }))).archivedSessionIds || [])
@@ -541,6 +693,36 @@ export function apply(ctx) {
       for (const it of res2) items.push({ ...it, archived: currentArchived.has(it.sessionId) })
     }
     return items
+  }
+
+  async function sidebarAuthority() {
+    const ids = []
+    try { for (const header of await sp.list()) ids.push(String(header.id)) } catch (e) {}
+    const sessions = ctx.get('sessions')
+    try { if (sessions) sessions.list().forEach((session) => { if (!ids.includes(String(session.id))) ids.push(String(session.id)) }) } catch (e) {}
+    const store = await readTrashStore()
+    if (!authorityTitlesLoaded && ids.length && typeof sq.readTitleSnapshots === 'function') {
+      const results = await sq.readTitleSnapshots(ids)
+      results.forEach((result, index) => {
+        if (result && result.status === 'fulfilled' && result.value && result.value.title && typeof result.value.title.title === 'string') {
+          authorityTitleCache.set(ids[index], result.value.title.title)
+        }
+      })
+      authorityTitlesLoaded = true
+    } else if (!authorityTitlesLoaded) {
+      for (const sid of ids) {
+        try {
+          const snapshot = await sq.readTitleSnapshot(sid)
+          if (snapshot && snapshot.title && typeof snapshot.title.title === 'string') authorityTitleCache.set(sid, snapshot.title.title)
+        } catch (e) {}
+      }
+      authorityTitlesLoaded = true
+    }
+    return {
+      titles: Object.fromEntries(authorityTitleCache),
+      trashedSessionIds: store.items.map((item) => String(item.sessionId)),
+      purgedSessionIds: store.purgedSessionIds.map(String),
+    }
   }
 
   // 聚合一条会话的详情（磁盘占用 / 轮次·步数·消息数 / 工具统计 / fetch /
@@ -668,6 +850,12 @@ export function apply(ctx) {
   ctx.effect(() => {
     const disposers = []
 
+    if (typeof ctx.on === 'function') disposers.push(ctx.on('session/event', (session, event) => {
+      if (event && event.type === 'session/title' && event.data && typeof event.data.title === 'string') {
+        authorityTitleCache.set(String(session.id), event.data.title)
+      }
+    }))
+
     disposers.push(ctx.webServer.register({
       kind: 'exact',
       path: '/archived-sessions/list',
@@ -683,7 +871,9 @@ export function apply(ctx) {
             const headers = await sp.list()
             materialized = new Set(headers.map((h) => String(h.id)))
           } catch (e) { /* best-effort */ }
-          const idStrs = ids.map(String).filter((id) => materialized.has(id) || (live && live.get(id)))
+          const trashStore = await readTrashStore()
+          const hidden = new Set([...trashStore.items.map((item) => String(item.sessionId)), ...trashStore.purgedSessionIds.map(String)])
+          const idStrs = ids.map(String).filter((id) => !hidden.has(id) && (materialized.has(id) || (live && live.get(id))))
           wsByPath = {}
           try { for (const ent of w.list()) wsByPath[ent.path] = ent } catch (e) { wsByPath = {} }
           const items = []
@@ -709,7 +899,7 @@ export function apply(ctx) {
           if (!sid) return json(res, { ok: false, error: 'missing sessionId' }, 400)
           json(res, await restoreOne(sid))
         } catch (e) {
-          json(res, { ok: false, error: String((e && e.message) || e) }, 500)
+          json(res, { ok: false, error: String((e && e.message) || e) }, errorStatus(e))
         }
       },
     }))
@@ -744,7 +934,7 @@ export function apply(ctx) {
           if (!sid) return json(res, { ok: false, error: 'missing sessionId' }, 400)
           json(res, await deleteOne(sid))
         } catch (e) {
-          json(res, { ok: false, error: String((e && e.message) || e) }, 500)
+          json(res, { ok: false, error: String((e && e.message) || e) }, errorStatus(e))
         }
       },
     }))
@@ -775,11 +965,47 @@ export function apply(ctx) {
       path: '/archived-sessions/trash/list',
       handler: async (req, res) => {
         try {
+          await cleanupExpiredTrash()
           const list = await readTrash()
           list.sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0))
-          json(res, { items: list })
+          const store = await readTrashStore()
+          json(res, { schemaVersion: store.schemaVersion, settings: store.settings, purgedSessionIds: store.purgedSessionIds, items: list })
         } catch (e) {
-          json(res, { ok: false, error: String((e && e.message) || e) }, 500)
+          json(res, { ok: false, error: String((e && e.message) || e) }, errorStatus(e))
+        }
+      },
+    }))
+
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/trash/settings',
+      handler: async (req, res) => {
+        try {
+          const body = await readJsonBody(req)
+          const settings = body && Object.prototype.hasOwnProperty.call(body, 'retentionDays')
+            ? await trashSettings({ retentionDays: body.retentionDays })
+            : await trashSettings()
+          json(res, { ok: true, settings })
+        } catch (e) {
+          json(res, { ok: false, error: String((e && e.message) || e) }, errorStatus(e))
+        }
+      },
+    }))
+
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/trash/verify',
+      handler: async (req, res) => {
+        try {
+          const items = await readTrash()
+          const results = await Promise.all(items.map(async (item) => {
+            let exists = false
+            if (typeof item.originalPath === 'string') exists = await stat(item.originalPath).then(() => true).catch(() => false)
+            return { sessionId: item.sessionId, status: exists ? 'ok' : 'missing', originalPath: item.originalPath || null }
+          }))
+          json(res, { ok: true, healthy: results.filter((r) => r.status === 'ok').length, missing: results.filter((r) => r.status === 'missing').length, results })
+        } catch (e) {
+          json(res, { ok: false, error: String((e && e.message) || e) }, errorStatus(e))
         }
       },
     }))
@@ -847,6 +1073,18 @@ export function apply(ctx) {
       },
     }))
 
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/sidebar-state',
+      handler: async (req, res) => {
+        try {
+          json(res, await sidebarAuthority())
+        } catch (e) {
+          json(res, { error: String((e && e.message) || e) }, errorStatus(e))
+        }
+      },
+    }))
+
     // Available target workspaces (for the move picker).
     disposers.push(ctx.webServer.register({
       kind: 'exact',
@@ -871,10 +1109,14 @@ export function apply(ctx) {
           const target = body && typeof body.targetPath === 'string' ? body.targetPath : null
           if (!sid) return json(res, { ok: false, error: 'missing sessionId' }, 400)
           if (!target) return json(res, { ok: false, error: 'missing targetPath' }, 400)
-          json(res, { sessionId: sid, ...(await moveOne(sid, target)) })
+          const moved = await moveOne(sid, target)
           // Reindex the host's in-memory sessionPath index so the sidebar
           // reflects the new grouping immediately (no DSH restart needed).
+          // Do this before replying: drag/drop and menu clients treat a 2xx
+          // response as the commit point and must never announce success while
+          // the sidebar still holds the old workspace index.
           try { await reindexRegistry() } catch (e) { /* best-effort */ }
+          json(res, { sessionId: sid, ...moved })
         } catch (e) {
           json(res, { ok: false, error: String((e && e.message) || e) }, 500)
         }

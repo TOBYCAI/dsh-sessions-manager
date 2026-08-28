@@ -1,5 +1,7 @@
 # dsh-sessions-manager
 
+> **Possibly the most stable and polished session manager available for DSH today.**
+
 > 中文 | English
 
 ![GitHub stars](https://img.shields.io/github/stars/TOBYCAI/dsh-sessions-manager?style=flat-square&color=facc15)
@@ -12,11 +14,24 @@
 
 A persistent DSH plugin (host + browser halves). Starting with v3.0.0, it covers both the **settings panel** and the **main sidebar**, so frequent session actions don't require opening Settings.
 
+## What's new in v3.2
+
+- **Cross-workspace sidebar drag-and-drop**: drop a session on a workspace heading to move it. It coexists with DSH's native same-group sorting and provides target highlighting, same-workspace protection, failure feedback, and a keyboard-accessible menu fallback.
+- **Complete session-management workspace**: All / Active / Archived / Recycle bin in one place, with full search, workspace filters, creation-time or title sorting, batch actions, and result counts.
+- **Reliable recycle-bin lifecycle**: soft delete, in-place restore, single permanent purge, empty-all, 7 / 30 / 90-day retention, and log-integrity verification, backed by schema v2, serialized mutations, and atomic writes.
+- **No post-delete resurrection**: permanent purge persists a tombstone first, waits for the live Session and persistence controller to retire, removes the log, and rebuilds workspace indexes so neither sessions nor an empty Ungrouped section reappear.
+- **Archive-state round trips**: a trashed session returns to the active or archived state it had before deletion; concurrent archive and restore mutations are serialized to prevent duplicate IDs, overwrites, and races.
+- **Authoritative cold-start titles**: the latest log-folded `session/title` corrects stale sidebar caches before a renamed session is opened.
+- **Safe migration for open sessions**: moving synchronizes the log header, persistence state, live Session, and WorkspaceRegistry, with backup, verification, and rollback on failure.
+- **Consistent and accessible UI**: tags use DSH's official 4px radius; destructive actions are confirmed, busy / empty / error states are explicit, and every drag action has a keyboard path.
+
 ## Features
 
 ### Settings panel: Session Manager
 
-- **Unified panel**: a single entry lists all sessions with an **All / Archived** filter; each row shows the title (falls back to the first user message), **active / archived** status, **session date**, and a **workspace tag**.
+- **Unified panel**: four top-level views — **All / Active / Archived / Recycle bin** — with search across title, session ID, and workspace, plus workspace filters and creation-time/title sorting.
+- **Cold-title synchronization**: the sidebar is corrected from the latest log-backed `session/title`, so renamed cold sessions no longer need to be opened before showing their current name.
+- **Sidebar workspace drag-and-drop**: drag a session onto a workspace heading to move it, with a highlighted drop target, same-workspace protection, failure feedback, and the More → Move session menu retained for keyboard access.
 - **Archive / Restore**: archive hides a session from the sidebar; restore unarchives it and puts it back into its original workspace group.
 - **Move to a workspace**: pick an **existing workspace**, or enter a **new directory path** (auto-created); the new-path mode also lets you open the **native OS directory picker** with a **「浏览…」** button. The session's working directory and log are migrated together, and even an open session can be moved safely.
 - **Session details**: expand any session to see **disk usage**, **turns / steps / user·assistant messages / tool calls / image attachments** stats, **tool-usage breakdown**, **search·fetch records**, the **write/edit file list** (already filtered for paths that no longer exist on disk), and **lineage** (parent session / child sessions / subagents).
@@ -35,7 +50,7 @@ A small dot is rendered to the left of each session row. Its color is driven by 
 | Color | State | Description |
 |---|---|---|
 | 🔵 Blue | Manually marked unread | Toggle via the ⋯ menu or by clicking the dot; auto-cleared when the session is opened |
-| 🟡 Yellow | Working | The session is currently running (`ongoing`) |
+| 🟡 Yellow | Working | The session is currently running (`running`) |
 | 🟠 Amber | Awaiting feedback | The session has a follow-up question and is waiting for your input or confirmation (`warning`) |
 | 🟢 Green | Completed but unread | The session is done (`done`) but you haven't reopened it yet; disappears after you view it |
 | 🔴 Red | Error / needs attention | The session hit an error (`error`) |
@@ -45,11 +60,14 @@ The plugin hides DSH's own status dot and re-renders it using the palette above,
 
 ### Recycle bin
 
-- A **Recycle bin** section is added at the bottom of the Session Manager panel.
+- The **Recycle bin** is a dedicated Session Manager view with item counts and deletion dates.
 - Normally deleted sessions land in the recycle bin first; they are **not removed from disk immediately**, and they won't be grouped under "未分组".
 - Inside the recycle bin you can **restore** a session (back to its original workspace) or **permanently delete** it (physically remove the log).
 - **Empty recycle bin** removes all items at once.
+- Keep items forever or automatically purge them after 7 / 30 / 90 days, and verify that their log files are intact.
+- The recycle-bin index uses a versioned schema, serialized mutations, and atomic writes; legacy array indexes migrate automatically.
 - Permanently deleted sessions stay hidden forever and won't reappear in the sidebar or session list.
+- Permanent deletion writes a host-side tombstone first, waits for the live Session and persistence controller to retire, removes the log, and rebuilds workspace indexes, preventing stale indexes, reconnects, or an empty Ungrouped section from resurfacing.
 
 ## Screenshots
 
@@ -114,9 +132,12 @@ lib/client.js      pre-built client (ModuleLoader CJS handshake)
 | POST | `/archived-sessions/trash/restore` | Restore a session from the recycle bin |
 | POST | `/archived-sessions/trash/purge` | Permanently delete a single session in the recycle bin |
 | POST | `/archived-sessions/trash/purge-many` | Empty / batch permanently delete recycle-bin sessions |
+| POST | `/archived-sessions/trash/settings` | Read or update automatic cleanup `{ retentionDays }` |
+| POST | `/archived-sessions/trash/verify` | Verify that recycle-bin logs still exist |
 | POST | `/archived-sessions/workspaces` | List available target workspaces |
 | POST | `/archived-sessions/move` | Move a session to a target workspace `{ sessionId, targetPath }` |
 | POST | `/archived-sessions/details` | Session details (disk / stats / tools / fetch / files / lineage) `{ sessionId }` |
+| POST | `/archived-sessions/sidebar-state` | Authoritative sidebar titles, recycle-bin IDs, and permanent-deletion tombstones |
 
 > Deleting a session moves it to the recycle bin by default; only "permanently delete" inside the recycle bin physically removes the log. Permanently deleted sessions are hidden forever on the client side so they don't reappear in the sidebar or "ungrouped" due to DSH runtime caching.
 

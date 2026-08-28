@@ -20,5 +20,9 @@ jobs:
         run: npm install
       - name: Build plugin (host + client)
         run: npm run build
+      - name: Run host behavior tests
+        run: npm test
+      - name: Verify committed bundles match source
+        run: git diff --exit-code -- lib
       - name: Verify host bundle loads
         run: node -e "import('./lib/index.js').then(m => { if (m.name !== 'dsh-sessions-manager') process.exit(1); }).catch(e => { console.error(e); process.exit(1); })"

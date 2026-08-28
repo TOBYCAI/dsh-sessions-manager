@@ -10,12 +10,17 @@
  * @module dsh-sessions-manager/client
  */
 
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 
 export const inject = ['slots']
 
+const PANEL_PREFS_KEY = 'dsm-panel-prefs-v1'
+function loadPanelPrefs() {
+  try { return JSON.parse(localStorage.getItem(PANEL_PREFS_KEY) || '{}') || {} } catch (e) { return {} }
+}
+
 const CSS = `
-.archv{display:flex;flex-direction:column;gap:4px;max-width:800px;padding:8px 2px 28px}
+.archv{--dsm-radius-tag:4px;display:flex;flex-direction:column;gap:4px;max-width:800px;padding:8px 2px 28px}
 .archv-head{display:flex;align-items:center;gap:10px;margin:0 0 2px}
 .archv-title{font-size:16px;font-weight:650;color:var(--dsw-alias-label-primary);letter-spacing:-0.01em;margin:0}
 .archv-count{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-fill-subtle);border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:1px 8px;flex:none}
@@ -26,6 +31,12 @@ const CSS = `
 .sess-fbtn{appearance:none;min-height:30px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-secondary);border-radius:999px;font-size:12px;font-weight:500;cursor:pointer}
 .sess-fbtn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .sess-fbtn-on{background:var(--dsw-alias-interactive-bg-active);color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l3)}
+.sess-tools{display:grid;grid-template-columns:minmax(180px,1fr) minmax(140px,.7fr) minmax(130px,.55fr);gap:8px;margin:0 0 8px}
+.sess-field{display:flex;flex-direction:column;gap:5px;min-width:0}
+.sess-field label{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary)}
+.sess-field input,.sess-field select{box-sizing:border-box;width:100%;min-height:36px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}
+.sess-results{font-size:11px;color:var(--dsw-alias-label-tertiary);margin:0 0 4px}
+.archv button:focus-visible,.archv input:focus-visible,.archv select:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
 .sess-batch{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 2px 4px;margin-bottom:4px}
 .sess-btntext{font-size:12px;color:var(--dsw-alias-label-tertiary);flex:none}
 .archv-list{display:flex;flex-direction:column;gap:8px}
@@ -36,7 +47,7 @@ const CSS = `
 .archv-main{min-width:0;display:flex;flex-direction:column;gap:4px}
 .archv-name{font-size:13px;font-weight:550;color:var(--dsw-alias-label-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .archv-meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;min-width:0}
-.archv-wtag{display:inline-flex;align-items:center;gap:4px;max-width:100%;font-size:11px;font-weight:500;line-height:1;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-fill-subtle);border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:3px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.archv-wtag{display:inline-flex;align-items:center;gap:4px;max-width:100%;font-size:11px;font-weight:500;line-height:1;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-fill-subtle);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-tag);padding:3px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .archv-wgone{border-style:dashed;color:var(--dsw-alias-state-error-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 55%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 7%,transparent)}
 .archv-active{color:var(--dsw-alias-state-success-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 8%,transparent)}
 .archv-date{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;flex:none}
@@ -45,7 +56,7 @@ const CSS = `
 .archv-check{width:15px;height:15px;accent-color:var(--dsw-alias-state-business-primary);flex:none;cursor:pointer}
 .archv-body{flex:1;min-width:0;display:flex;align-items:center;gap:12px}
 .archv-actions{display:flex;gap:8px;flex:none;flex-wrap:nowrap;justify-content:flex-end}
-.archv-btn{appearance:none;min-height:32px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-secondary);border-radius:9px;font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:6px;transition:background-color .15s ease,border-color .15s ease,color .15s ease}
+.archv-btn{appearance:none;min-height:32px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-secondary);border-radius:9px;font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-align:center;transition:background-color .15s ease,border-color .15s ease,color .15s ease}
 .archv-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .archv-btn:disabled{opacity:.5;cursor:default}
 .archv-del{color:var(--dsw-alias-state-error-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 45%,transparent)}
@@ -62,7 +73,7 @@ const CSS = `
 @keyframes archv-rot{to{transform:rotate(360deg)}}
 @keyframes archv-pop{from{opacity:0;transform:translateX(-50%) translateY(10px)}}
 @media (prefers-reduced-motion:reduce){.archv-skel-card::after{animation:none}.archv-card,.archv-btn{transition:none}.archv-status,.archv-spin{animation:none}}
-@media (max-width:640px){.archv-card{flex-direction:column;align-items:stretch;gap:10px}.archv-actions{justify-content:flex-end}}
+@media (max-width:640px){.archv-card{flex-direction:column;align-items:stretch;gap:10px}.archv-actions{justify-content:flex-end}.sess-tools{grid-template-columns:1fr}.sess-fbtn,.archv-btn{min-height:40px}}
 .mv-sheet{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:12px;margin-top:12px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-fill-subtle)}
 .mv-sheet-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .mv-sheet-title{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary);margin:0}
@@ -90,7 +101,7 @@ const CSS = `
 .dtl-sec{margin-top:12px}
 .dtl-sec-t{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary);text-transform:uppercase;letter-spacing:.03em;margin-bottom:6px}
 .dtl-tags{display:flex;flex-wrap:wrap;gap:6px}
-.dtl-tag{display:inline-flex;font-size:11px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-fill-elevated);border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:2px 8px}
+.dtl-tag{display:inline-flex;font-size:11px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-fill-elevated);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-tag);padding:2px 8px}
 .dtl-list{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:var(--dsw-alias-label-secondary)}
 .dtl-list code,.dtl-paths code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:var(--dsw-alias-label-primary);word-break:break-all}
 .dtl-filetool{color:var(--dsw-alias-label-tertiary)}
@@ -199,7 +210,11 @@ function installSettingsNavIcons(ctx) {
 function SessionPanel({ workspacesSvc }) {
   const [sessions, setSessions] = useState(null)
   const [workspaces, setWorkspaces] = useState([])
-  const [filter, setFilter] = useState('all') // 'all' | 'archived'
+  const initialPrefs = useRef(loadPanelPrefs()).current
+  const [filter, setFilter] = useState(() => ['all', 'active', 'archived', 'trash'].includes(initialPrefs.filter) ? initialPrefs.filter : 'all')
+  const [query, setQuery] = useState('')
+  const [workspaceFilter, setWorkspaceFilter] = useState(() => initialPrefs.workspaceFilter || 'all')
+  const [sortBy, setSortBy] = useState(() => ['newest', 'oldest', 'title'].includes(initialPrefs.sortBy) ? initialPrefs.sortBy : 'newest')
   const [selected, setSelected] = useState({})
   const [delTarget, setDelTarget] = useState(null)
   const [confirmBatch, setConfirmBatch] = useState(false)
@@ -213,12 +228,16 @@ function SessionPanel({ workspacesSvc }) {
   const [picking, setPicking] = useState(false)
   const [trash, setTrash] = useState([])
   const [trashBusy, setTrashBusy] = useState(null)
+  const [trashSettings, setTrashSettings] = useState({ retentionDays: 0 })
+  const [trashCheck, setTrashCheck] = useState(null)
+  const [purgeTarget, setPurgeTarget] = useState(null)
   const [details, setDetails] = useState({})
   const [openDetails, setOpenDetails] = useState(null)
   const [detailsLoading, setDetailsLoading] = useState(null)
   const [openMenu, setOpenMenu] = useState(null)
   const timer = useRef(null)
   const menuRef = useRef(null)
+  const dialogRef = useRef(null)
 
   const showToast = (msg) => {
     if (timer.current) clearTimeout(timer.current)
@@ -254,6 +273,10 @@ function SessionPanel({ workspacesSvc }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  useEffect(() => {
+    try { localStorage.setItem(PANEL_PREFS_KEY, JSON.stringify({ filter, workspaceFilter, sortBy })) } catch (e) {}
+  }, [filter, workspaceFilter, sortBy])
+
   // Close the ⋯ menu on outside click / Escape (no full-screen backdrop).
   useEffect(() => {
     if (openMenu === null) return
@@ -269,6 +292,20 @@ function SessionPanel({ workspacesSvc }) {
     }
   }, [openMenu])
 
+  useEffect(() => {
+    if (!delTarget && !purgeTarget) return
+    const previous = document.activeElement
+    const onKey = (e) => {
+      if (e.key === 'Escape') { setDelTarget(null); setPurgeTarget(null) }
+    }
+    document.addEventListener('keydown', onKey)
+    requestAnimationFrame(() => dialogRef.current && dialogRef.current.querySelector('button')?.focus())
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      if (previous && typeof previous.focus === 'function') previous.focus()
+    }
+  }, [delTarget, purgeTarget])
+
   const wsPath = (id) => {
     const w = workspaces.find((x) => x.workspaceId === id)
     return w ? w.path : ''
@@ -276,7 +313,21 @@ function SessionPanel({ workspacesSvc }) {
 
   const archivedList = sessions ? sessions.filter((x) => x.archived) : []
   const activeList = sessions ? sessions.filter((x) => !x.archived) : []
-  const list = filter === 'archived' ? archivedList : sessions || []
+  const list = useMemo(() => {
+    if (filter === 'trash') return []
+    const base = filter === 'archived' ? archivedList : filter === 'active' ? activeList : sessions || []
+    const needle = query.trim().toLocaleLowerCase()
+    const filtered = base.filter((item) => {
+      if (workspaceFilter !== 'all' && (item.workspacePath || '') !== workspaceFilter) return false
+      if (!needle) return true
+      return [item.title, item.sessionId, item.workspaceTitle, item.workspacePath].some((value) => String(value || '').toLocaleLowerCase().includes(needle))
+    })
+    return [...filtered].sort((a, b) => {
+      if (sortBy === 'oldest') return Number(a.createdAt || 0) - Number(b.createdAt || 0)
+      if (sortBy === 'title') return String(a.title || '').localeCompare(String(b.title || ''), 'zh-CN')
+      return Number(b.createdAt || 0) - Number(a.createdAt || 0)
+    })
+  }, [sessions, filter, query, workspaceFilter, sortBy])
   const selIds = Object.keys(selected).filter((k) => selected[k])
 
   const toggle = (id) => setSelected((s) => ({ ...s, [id]: !s[id] }))
@@ -316,8 +367,22 @@ function SessionPanel({ workspacesSvc }) {
 
   const loadTrash = () => {
     postJSON('/archived-sessions/trash/list', {})
-      .then((r) => setTrash(r.items || []))
+      .then((r) => { setTrash(r.items || []); setTrashSettings(r.settings || { retentionDays: 0 }) })
       .catch(() => {})
+  }
+
+  const updateRetention = (days) => {
+    setTrashBusy('__settings')
+    postJSON('/archived-sessions/trash/settings', { retentionDays: Number(days) })
+      .then((r) => { setTrashBusy(null); setTrashSettings(r.settings); showToast('已更新自动清理策略') })
+      .catch((e) => { setTrashBusy(null); setError(String((e && e.message) || e)) })
+  }
+
+  const verifyTrash = () => {
+    setTrashBusy('__verify')
+    postJSON('/archived-sessions/trash/verify', {})
+      .then((r) => { setTrashBusy(null); setTrashCheck(r); showToast(r.missing ? `发现 ${r.missing} 条日志缺失` : '回收站校验通过') })
+      .catch((e) => { setTrashBusy(null); setError(String((e && e.message) || e)) })
   }
 
   const restoreTrash = (sid) => {
@@ -339,7 +404,19 @@ function SessionPanel({ workspacesSvc }) {
     setTrashBusy('__all')
     const all = trash.map((t) => t.sessionId)
     postJSON('/archived-sessions/trash/purge-many', { sessionIds: all })
-      .then(() => { setTrashBusy(null); showToast('已清空回收站'); dsmMarkPurged(all); dsmLoadTrashIds(); loadTrash() })
+      .then((result) => {
+        setTrashBusy(null)
+        const rows = result.results || []
+        const succeeded = rows.filter((item) => item.ok).map((item) => item.sessionId)
+        const failed = rows.filter((item) => !item.ok)
+        if (succeeded.length) dsmMarkPurged(succeeded)
+        dsmLoadTrashIds()
+        loadTrash()
+        if (failed.length) {
+          const first = failed[0]
+          setError(`清理完成 ${succeeded.length} 条，失败 ${failed.length} 条：${first.error || first.sessionId}`)
+        } else showToast('已清空回收站')
+      })
       .catch((e) => { setTrashBusy(null); setError(String((e && e.message) || e)) })
   }
 
@@ -488,11 +565,38 @@ function SessionPanel({ workspacesSvc }) {
       ) : (
         <>
           <div className="sess-filter" role="tablist" aria-label="会话筛选">
-            <button type="button" className={'sess-fbtn' + (filter === 'all' ? ' sess-fbtn-on' : '')} onClick={() => { setFilter('all'); clearSel(); setConfirmBatch(false) }}>全部 ({sessions.length})</button>
-            <button type="button" className={'sess-fbtn' + (filter === 'archived' ? ' sess-fbtn-on' : '')} onClick={() => { setFilter('archived'); clearSel(); setConfirmBatch(false) }}>已归档 ({archivedList.length})</button>
+            <button type="button" role="tab" aria-selected={filter === 'all'} className={'sess-fbtn' + (filter === 'all' ? ' sess-fbtn-on' : '')} onClick={() => { setFilter('all'); clearSel(); setConfirmBatch(false) }}>全部 ({sessions.length})</button>
+            <button type="button" role="tab" aria-selected={filter === 'active'} className={'sess-fbtn' + (filter === 'active' ? ' sess-fbtn-on' : '')} onClick={() => { setFilter('active'); clearSel(); setConfirmBatch(false) }}>活动 ({activeList.length})</button>
+            <button type="button" role="tab" aria-selected={filter === 'archived'} className={'sess-fbtn' + (filter === 'archived' ? ' sess-fbtn-on' : '')} onClick={() => { setFilter('archived'); clearSel(); setConfirmBatch(false) }}>已归档 ({archivedList.length})</button>
+            <button type="button" role="tab" aria-selected={filter === 'trash'} className={'sess-fbtn' + (filter === 'trash' ? ' sess-fbtn-on' : '')} onClick={() => { setFilter('trash'); clearSel(); setConfirmBatch(false) }}>回收站 ({trash.length})</button>
           </div>
 
-          {list.length > 0 && (
+          {filter !== 'trash' && (
+            <>
+              <div className="sess-tools" aria-label="查找和整理会话">
+                <div className="sess-field">
+                  <label htmlFor="dsm-search">搜索会话</label>
+                  <input id="dsm-search" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="标题、会话 ID 或工作区" />
+                </div>
+                <div className="sess-field">
+                  <label htmlFor="dsm-workspace-filter">工作区</label>
+                  <select id="dsm-workspace-filter" value={workspaceFilter} onChange={(e) => setWorkspaceFilter(e.target.value)}>
+                    <option value="all">全部工作区</option>
+                    {workspaces.map((w) => <option key={w.workspaceId} value={w.path}>{w.title}</option>)}
+                  </select>
+                </div>
+                <div className="sess-field">
+                  <label htmlFor="dsm-sort">排序</label>
+                  <select id="dsm-sort" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
+                    <option value="newest">最新创建</option><option value="oldest">最早创建</option><option value="title">标题 A–Z</option>
+                  </select>
+                </div>
+              </div>
+              <div className="sess-results" role="status">显示 {list.length} 个会话{query || workspaceFilter !== 'all' ? `，共 ${filter === 'archived' ? archivedList.length : filter === 'active' ? activeList.length : sessions.length} 个` : ''}</div>
+            </>
+          )}
+
+          {filter !== 'trash' && list.length > 0 && (
             <div className="sess-batch">
               <span className="sess-btntext">{selIds.length ? `已选 ${selIds.length} 项` : (filter === 'archived' ? `共 ${archivedList.length} 个归档会话` : `共 ${sessions.length} 个会话（活动 ${activeList.length} / 已归档 ${archivedList.length}）`)}</span>
               <button type="button" className="archv-btn" disabled={list.length === 0} onClick={selectAll}>全选</button>
@@ -504,7 +608,7 @@ function SessionPanel({ workspacesSvc }) {
                       <button type="button" className="archv-btn archv-del" disabled={busy !== null} onClick={() => doBatch('delete-many')}>{confirmBatch ? '确认删除所选?' : '删除所选'}</button>
                     </>
                   )}
-                  {filter === 'all' && (
+                  {filter !== 'archived' && (
                     <button type="button" className="archv-btn" disabled={busy !== null} onClick={() => doBatch('archive-many')}>归档所选</button>
                   )}
                   <button type="button" className="archv-btn" onClick={clearSel}>取消选择</button>
@@ -513,9 +617,9 @@ function SessionPanel({ workspacesSvc }) {
             </div>
           )}
 
-          {list.length === 0 ? (
-            <div className="archv-empty">{filter === 'archived' ? '目前没有归档会话。在“全部”里选中会话点“归档”即可收纳进来。' : '暂无可管理的会话。'}</div>
-          ) : (
+          {filter !== 'trash' && list.length === 0 ? (
+            <div className="archv-empty">{query || workspaceFilter !== 'all' ? '没有匹配的会话。请调整搜索词或工作区筛选。' : filter === 'archived' ? '目前没有归档会话。在“全部”里选中会话点“归档”即可收纳进来。' : filter === 'active' ? '目前没有活动会话。' : '暂无可管理的会话。'}</div>
+          ) : filter !== 'trash' ? (
             <div className="archv-list" role="list">
               {list.map((it) => {
                 const date = fmtDate(it.createdAt)
@@ -650,13 +754,13 @@ function SessionPanel({ workspacesSvc }) {
                 )
               })}
             </div>
-          )}
+          ) : null}
         </>
       )}
       {toast && <div className="archv-status" role="status">{toast}</div>}
       {delTarget && (
         <div className="dlg-backdrop" onClick={() => setDelTarget(null)}>
-          <div className="dlg" role="alertdialog" aria-modal="true" aria-label="删除会话" onClick={(e) => e.stopPropagation()}>
+          <div ref={dialogRef} className="dlg" role="alertdialog" aria-modal="true" aria-label="删除会话" onClick={(e) => e.stopPropagation()}>
             <h3 className="dlg-title">删除会话</h3>
             <p className="dlg-text">确认删除「{delTarget.title || delTarget.sessionId}」？将移入回收站，可在本页底部「回收站」中恢复或彻底删除。</p>
             <div className="dlg-actions">
@@ -666,11 +770,22 @@ function SessionPanel({ workspacesSvc }) {
           </div>
         </div>
       )}
-      <section className="dsm-trash" aria-label="回收站">
+      {filter === 'trash' && <section className="dsm-trash" aria-label="回收站">
         <div className="dsm-trash-h">
           <h3>回收站</h3>
-          <span className="dsm-trash-count">{trash.length ? `（${trash.length} 个待清理）` : '（空）'}{trash.length > 0 && <button type="button" className="archv-btn" style={{ marginLeft: 10 }} disabled={trashBusy !== null} onClick={purgeAllTrash}>清空回收站</button>}</span>
+          <span className="dsm-trash-count">{trash.length ? `（${trash.length} 个待清理）` : '（空）'}</span>
         </div>
+        <div className="sess-tools">
+          <div className="sess-field">
+            <label htmlFor="dsm-retention">自动清理</label>
+            <select id="dsm-retention" value={trashSettings.retentionDays || 0} disabled={trashBusy !== null} onChange={(e) => updateRetention(e.target.value)}>
+              <option value="0">不自动清理</option><option value="7">保留 7 天</option><option value="30">保留 30 天</option><option value="90">保留 90 天</option>
+            </select>
+          </div>
+          <div className="sess-field"><label>数据检查</label><button type="button" className="archv-btn" disabled={trashBusy !== null} onClick={verifyTrash}>{trashBusy === '__verify' ? '校验中…' : '校验日志完整性'}</button></div>
+          <div className="sess-field"><label>永久清理</label><button type="button" className="archv-btn archv-del" disabled={trashBusy !== null || !trash.length} onClick={() => setPurgeTarget('__all')}>清空回收站</button></div>
+        </div>
+        {trashCheck && <div className={trashCheck.missing ? 'archv-err' : 'archv-empty'} role="status">校验完成：{trashCheck.healthy} 条正常，{trashCheck.missing} 条日志缺失。</div>}
         {trash.length === 0 ? (
           <div className="dsm-trash-empty">回收站为空。删除的会话会先进入这里，可恢复或彻底删除。</div>
         ) : (
@@ -681,13 +796,25 @@ function SessionPanel({ workspacesSvc }) {
                 <span className="dsm-trash-date">{fmtDate(t.deletedAt)}</span>
                 <span className="dsm-trash-actions">
                   <button type="button" className="archv-btn" disabled={trashBusy !== null} onClick={() => restoreTrash(t.sessionId)}>恢复</button>
-                  <button type="button" className="archv-btn archv-del" disabled={trashBusy !== null} onClick={() => purgeTrash(t.sessionId)}>彻底删除</button>
+                  <button type="button" className="archv-btn archv-del" disabled={trashBusy !== null} onClick={() => setPurgeTarget(t.sessionId)}>彻底删除</button>
                 </span>
               </div>
             ))}
           </div>
         )}
-      </section>
+      </section>}
+      {purgeTarget && (
+        <div className="dlg-backdrop" onClick={() => setPurgeTarget(null)}>
+          <div ref={dialogRef} className="dlg" role="alertdialog" aria-modal="true" aria-labelledby="dsm-purge-title" onClick={(e) => e.stopPropagation()}>
+            <h3 id="dsm-purge-title" className="dlg-title">永久删除{purgeTarget === '__all' ? '全部回收站会话' : '这个会话'}？</h3>
+            <p className="dlg-text">此操作会物理删除日志，无法恢复。归档、筛选和重新安装插件都不能找回这些数据。</p>
+            <div className="dlg-actions">
+              <button type="button" className="archv-btn" onClick={() => setPurgeTarget(null)}>取消</button>
+              <button type="button" className="archv-btn archv-del" onClick={() => { const target = purgeTarget; setPurgeTarget(null); target === '__all' ? purgeAllTrash() : purgeTrash(target) }}>确认永久删除</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -734,6 +861,10 @@ const SIDEBAR_AUG_CSS = `
 .dsm-dot-unread-manual{background:var(--dsw-alias-state-business-primary)}
 .dsm-dot-waiting{background:var(--dsw-alias-state-warning-primary)}
 .dsm-dot-unread{background:var(--dsw-alias-state-success-primary)}
+.dsm-drag-source{opacity:.48}
+.dsm-drop-target{position:relative;background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 10%,transparent)!important;outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px;border-radius:8px}
+.dsm-drop-target::after{content:'移动到这里';position:absolute;right:8px;top:50%;transform:translateY(-50%);padding:1px 6px;border-radius:4px;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-inverted);font-size:10px;font-weight:600;line-height:16px;pointer-events:none}
+.dsm-drag-busy{cursor:progress!important}
 .dsm-trash{margin-top:18px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:14px}
 .dsm-trash-h{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
 .dsm-trash-h h3{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary);margin:0}
@@ -742,7 +873,7 @@ const SIDEBAR_AUG_CSS = `
 .dsm-trash-row{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-fill-elevated)}
 .dsm-trash-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--dsw-alias-label-primary)}
 .dsm-trash-date{font-size:11px;color:var(--dsw-alias-label-tertiary);flex:none;white-space:nowrap}
-.dsm-trash-actions{display:flex;gap:6px;flex:none}
+.dsm-trash-actions{display:flex;gap:6px;flex:none}.dsm-trash-actions .archv-btn{min-width:72px}
 .dsm-trash-empty{font-size:12px;color:var(--dsw-alias-label-tertiary);padding:6px 2px}
 `
 
@@ -769,12 +900,16 @@ function dsmToggleManual(id) {
 // up under DSH's "未分组" group. Loaded from the backend on a throttle and
 // updated optimistically when our own ⋯-menu deletes a session.
 let dsmTrashIds = null
+let dsmServerPurgedIds = new Set()
+let dsmAuthoritativeTitles = new Map()
 let dsmTrashTick = 0
 async function dsmLoadTrashIds() {
   try {
-    const r = await postJSON('/archived-sessions/trash/list', {})
-    const items = (r && r.items) || []
-    dsmTrashIds = new Set(items.map((t) => String(t.sessionId)))
+    const r = await postJSON('/archived-sessions/sidebar-state', {})
+    dsmTrashIds = new Set(((r && r.trashedSessionIds) || []).map(String))
+    dsmServerPurgedIds = new Set(((r && r.purgedSessionIds) || []).map(String))
+    dsmAuthoritativeTitles = new Map(Object.entries((r && r.titles) || {}).map(([id, title]) => [String(id), String(title)]))
+    if (dsmRepaintDots) dsmRepaintDots()
   } catch (e) { /* keep last known set */ }
   return dsmTrashIds
 }
@@ -786,8 +921,10 @@ async function dsmLoadTrashIds() {
 const DSM_KEY_PURGED = 'dsm-purged-v1'
 let dsmPurgedIds = null
 function dsmLoadPurged() {
-  if (dsmPurgedIds) return dsmPurgedIds
-  try { dsmPurgedIds = new Set(JSON.parse(localStorage.getItem(DSM_KEY_PURGED) || '[]')) } catch (e) { dsmPurgedIds = new Set() }
+  if (!dsmPurgedIds) {
+    try { dsmPurgedIds = new Set(JSON.parse(localStorage.getItem(DSM_KEY_PURGED) || '[]')) } catch (e) { dsmPurgedIds = new Set() }
+  }
+  dsmServerPurgedIds.forEach((id) => dsmPurgedIds.add(id))
   return dsmPurgedIds
 }
 function dsmSavePurged() { try { localStorage.setItem(DSM_KEY_PURGED, JSON.stringify([...dsmLoadPurged()])) } catch (e) {} }
@@ -1030,7 +1167,7 @@ function installSidebarSessionMenuAug() {
 // Left-side per-session status dot (DOM shim). The color is driven by DSH's
 // REAL session status, read from the row's own StateDot ([data-state]):
 //   手动标记未读（蓝） = 用户在 ⋯ 菜单或点击圆点手动标记，localStorage 持久化（最高优先级）
-//   工作中（黄）       = DSH state 'ongoing'
+//   工作中（黄）       = DSH state 'running'
 //   需用户反馈（琥珀） = DSH state 'warning'（有追问需用户反馈）
 //   完成后未读（绿）   = DSH state 'done' 且用户尚未读过（read 集合）
 //   完成已读（不显示） = DSH state 'done' 且已读过（read 集合持久化）
@@ -1059,7 +1196,8 @@ function installSidebarStatusDots() {
     }
     return null
   }
-  const rowId = (row) => fiberProp(row, (p) => (p.node && typeof p.node.id === 'string' && p.node.id ? p.node.id : null))
+  const rowNode = (row) => fiberProp(row, (p) => (p.node && typeof p.node.id === 'string' && p.node.id ? p.node : null))
+  const rowId = (row) => { const node = rowNode(row); return node ? node.id : null }
   let curActive = null
   const activeRowId = () => {
     const sel = document.querySelector('[role="treeitem"][aria-selected="true"]')
@@ -1067,14 +1205,14 @@ function installSidebarStatusDots() {
   }
   // Dot colors per the user's scheme. We read DSH's REAL session status from the
   // row's own StateDot (its [data-state] attr) and recolor it:
-  //   ongoing  → 黄  工作中(running)
+  //   running  → 黄  工作中
   //   warning  → 琥珀 有追问需用户反馈
   //   done     → 绿  完成后未读（读过则不再显示）
   //   error    → 红  出错/需关注（与 DSH 自带 StateDot 一致）
   //   (manual  → 蓝  手动标记未读，最高优先级)
   const COLOR = {
     manual: 'var(--dsw-alias-state-business-primary)',        // 蓝 手动标记未读
-    running: '#EAB308',                                       // 黄 工作中 (DSH ongoing)
+    running: '#EAB308',                                       // 黄 工作中 (DSH running)
     feedback: 'var(--dsw-alias-state-warning-primary)',       // 琥珀 需用户反馈 (DSH warning)
     done: 'var(--dsw-alias-state-success-primary)',           // 绿 完成后未读 (DSH done)
     error: 'var(--dsw-alias-state-error-primary)',            // 红 出错/需关注 (DSH error)
@@ -1109,6 +1247,17 @@ function installSidebarStatusDots() {
         return
       }
       if (row.style.display === 'none') row.style.display = ''
+      // DSH's cold list baseline can expose a stale header title until the
+      // Session is opened. Paint the latest log-folded title from the host
+      // authority without materializing the Session or changing its log.
+      const authoritativeTitle = dsmAuthoritativeTitles.get(id)
+      if (authoritativeTitle) {
+        const node = rowNode(row) || {}
+        const expected = new Set([node.title, node.displayTitle, node.name].filter((value) => typeof value === 'string'))
+        const spans = [...row.children].filter((el) => el.tagName === 'SPAN' && !el.querySelector('[data-state]') && (el.textContent || '').trim())
+        const titleEl = spans.find((el) => expected.has((el.textContent || '').trim())) || spans[0]
+        if (titleEl && titleEl.textContent !== authoritativeTitle) titleEl.textContent = authoritativeTitle
+      }
       // Read DSH's REAL session status from the row's own StateDot and recolor
       // it with the user's scheme (we also hide DSH's dot so only ours shows).
       const sd = row.querySelector('[data-state]')
@@ -1142,7 +1291,7 @@ function installSidebarStatusDots() {
     })
   }
   dsmRepaintDots = paint
-  const tick = () => { if (++dsmTrashTick % 3 === 0) dsmLoadTrashIds(); paint() }
+  const tick = () => { if (++dsmTrashTick % 8 === 0) dsmLoadTrashIds(); paint() }
   let raf = 0
   const schedulePaint = () => { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; paint() }) }
   tick()
@@ -1153,10 +1302,160 @@ function installSidebarStatusDots() {
   setInterval(tick, 1200)
 }
 
+// Cross-workspace drag/drop for the native DSH sidebar. DSH does not expose a
+// sidebar-row plugin slot, so the adapter discovers session/workspace rows from
+// their React fiber nodes, while the actual move remains entirely host-owned.
+// The existing “移动会话” menu is also the keyboard-accessible fallback.
+function installSidebarWorkspaceDrag() {
+  if (typeof document === 'undefined') return
+  let sessions = new Map()
+  let dragging = null
+  let moving = false
+
+  const findFiber = (el) => {
+    const key = Object.keys(el).find((k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'))
+    return key ? el[key] : null
+  }
+  const fiberNodes = (el) => {
+    const out = []
+    let fiber = findFiber(el)
+    let guard = 0
+    while (fiber && guard++ < 300) {
+      const props = fiber.memoizedProps
+      if (props && props.node && typeof props.node === 'object') out.push(props.node)
+      // DSH's SessionNodeItem receives `node`, while ProjectRowItem (the
+      // workspace heading) receives `group`. Without the latter every session
+      // can start dragging but no workspace can ever become a valid drop zone.
+      if (props && props.group && typeof props.group === 'object') out.push(props.group)
+      fiber = fiber.return
+    }
+    return out
+  }
+  const sessionForRow = (row) => {
+    for (const node of fiberNodes(row)) {
+      const id = node && node.id != null ? String(node.id) : ''
+      if (sessions.has(id)) return sessions.get(id)
+      // The live DSH row is authoritative even before the async sidebar-state
+      // refresh finishes. Workspace groups use `workspaceId`, never `id`.
+      if (id && node.workspaceId == null && (node.title != null || node.updatedAt != null || node.blank != null)) {
+        return { sessionId: id, title: node.title || '', workspacePath: null }
+      }
+    }
+    return null
+  }
+  const workspaceForRow = (row) => {
+    // A session row's fiber chain also contains its parent workspace node.
+    // Reject it explicitly so only the visible workspace header is a drop zone.
+    if (sessionForRow(row)) return null
+    for (const group of fiberNodes(row)) {
+      if (group.workspaceId != null && typeof group.cwd === 'string' && group.cwd) {
+        return { workspaceId: String(group.workspaceId), path: group.cwd, title: group.label || group.cwd }
+      }
+    }
+    return null
+  }
+  const eventRow = (event) => {
+    for (const item of event.composedPath ? event.composedPath() : []) {
+      if (item instanceof Element && item.getAttribute('role') === 'treeitem') return item
+    }
+    return event.target instanceof Element ? event.target.closest('[role="treeitem"]') : null
+  }
+  const toast = (message) => {
+    const el = document.createElement('div')
+    el.className = 'dsm-toast'
+    el.setAttribute('role', 'status')
+    el.textContent = message
+    document.body.appendChild(el)
+    setTimeout(() => el.remove(), 2600)
+  }
+  const clearVisuals = () => {
+    document.querySelectorAll('.dsm-drag-source,.dsm-drop-target').forEach((el) => el.classList.remove('dsm-drag-source', 'dsm-drop-target'))
+  }
+  const decorateRows = () => {
+    document.querySelectorAll('[role="treeitem"]').forEach((row) => {
+      const session = sessionForRow(row)
+      const ws = workspaceForRow(row)
+      if (session) {
+        row.setAttribute('aria-description', '可拖动到其他工作区；键盘用户可通过更多菜单中的移动会话操作')
+      }
+      if (ws) row.setAttribute('data-dsm-workspace-drop', '')
+    })
+  }
+  const refresh = async () => {
+    try {
+      const sessionResult = await postJSON('/archived-sessions/sessions', {})
+      sessions = new Map((sessionResult.items || []).map((item) => [String(item.sessionId), item]))
+      decorateRows()
+    } catch (e) { /* sidebar enhancement remains optional */ }
+  }
+
+  // Capture before DSH's delegated React handlers. DSH reserves the same
+  // native drag gesture for reordering sessions inside one group; only a real
+  // workspace-heading target is intercepted here, so same-group sorting keeps
+  // its official behavior.
+  document.addEventListener('dragstart', (event) => {
+    const row = eventRow(event)
+    const item = row && sessionForRow(row)
+    if (!item || moving) return
+    dragging = item
+    row.classList.add('dsm-drag-source')
+  }, true)
+  document.addEventListener('dragover', (event) => {
+    const row = eventRow(event)
+    const target = row && workspaceForRow(row)
+    if (!dragging || !target || moving) return
+    if (dragging.workspacePath && target.path === dragging.workspacePath) return
+    event.preventDefault()
+    event.stopPropagation()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+    document.querySelectorAll('.dsm-drop-target').forEach((el) => { if (el !== row) el.classList.remove('dsm-drop-target') })
+    row.classList.add('dsm-drop-target')
+  }, true)
+  document.addEventListener('drop', async (event) => {
+    const row = eventRow(event)
+    const item = dragging
+    const target = row && workspaceForRow(row)
+    if (!item || !target || moving || (item.workspacePath && target.path === item.workspacePath)) return
+    event.preventDefault()
+    event.stopPropagation()
+    moving = true
+    clearVisuals()
+    row.classList.add('dsm-drag-busy')
+    try {
+      const result = await postJSON('/archived-sessions/move', { sessionId: item.sessionId, targetPath: target.path })
+      sessions.set(item.sessionId, { ...item, workspacePath: result.workspacePath || target.path, workspaceTitle: result.workspaceTitle || target.title })
+      await dsmLoadTrashIds()
+      toast(`已移到「${result.workspaceTitle || target.title}」`)
+    } catch (error) {
+      toast('移动失败：' + String((error && error.message) || error))
+    } finally {
+      moving = false
+      dragging = null
+      row.classList.remove('dsm-drag-busy')
+      decorateRows()
+    }
+  }, true)
+  document.addEventListener('dragend', () => {
+    dragging = null
+    clearVisuals()
+  }, true)
+
+  let decorateTimer = null
+  const scheduleDecorate = () => {
+    if (decorateTimer) return
+    decorateTimer = requestAnimationFrame(() => { decorateTimer = null; decorateRows() })
+  }
+  refresh()
+  const observer = new MutationObserver(scheduleDecorate)
+  observer.observe(document.body, { childList: true, subtree: true })
+  setInterval(refresh, 5000)
+}
+
 export function apply(ctx) {
   installSettingsNavIcons(ctx)
   installSidebarSessionMenuAug()
   installSidebarStatusDots()
+  installSidebarWorkspaceDrag()
   const workspacesSvc = ctx.get('workspaces')
   ctx.slots.inject('settings.section', () =>
     ctx.slots.register(
