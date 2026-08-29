@@ -9,9 +9,9 @@
 // relocates a conversation (session) between workspaces on move.
 import { mkdir, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join } from 'node:path'
-import { readFileSync, writeFileSync } from 'node:fs'
-import zlib from 'node:zlib'
+import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { rewriteFrame0Cwd } from './zstd-frame.js'
 
 export const name = 'dsh-sessions-manager'
 export const inject = ['webServer', 'workspaceRegistry', 'sessionPersistence', 'sessionQuery', 'storageDomain']
@@ -497,52 +497,10 @@ export function apply(ctx) {
       return null
     }
 
-    // Rewrite only the first zstd frame's cwd to `newCwd`. DSH stores each
-    // session as concatenated independent zstd frames; frame0 is exactly
-    // `JSON.stringify(headerLineObj) + "\n"`. We slice frame0 by its trailing
-    // magic boundary, decode, mutate cwd, recompress with the same checksum
-    // flag, and concatenate the remaining frames untouched. This keeps the log
-    // valid for the persistence layer's frame0 reader while moving it to the
-    // new workspace without a full re-encode.
-    const ZSTD_MAGIC = 4247762216
-    const CHECKSUM_OPTS = { params: { [zlib.constants.ZSTD_c_checksumFlag]: 1 } }
-    function findZstdFrameStarts(buf) {
-      // Scan for zstd magic number (0xFD2FB528 LE) and validate each candidate
-      // by attempting decompression. This avoids false positives from the magic
-      // bytes appearing inside compressed data.
-      const MAGIC = 0xFD2FB528
-      const starts = []
-      for (let i = 0; i + 4 <= buf.length; i++) {
-        if (buf.readUInt32LE(i) === MAGIC) {
-          // Validate: try to decompress from this offset
-          try {
-            zlib.zstdDecompressSync(buf.subarray(i, i + Math.min(buf.length - i, 1000000)))
-            starts.push(i)
-          } catch (_) {
-            // Not a real frame boundary, skip
-          }
-        }
-      }
-      return starts
-    }
-
-    function rewriteFrame0Cwd(filePath, newCwd) {
-      const buf = readFileSync(filePath)
-      const starts = findZstdFrameStarts(buf)
-      if (starts.length === 0) throw new Error('会话日志格式异常（无 zstd 帧）')
-      const end0 = starts.length > 1 ? starts[1] : buf.length
-      const frame0 = buf.subarray(starts[0], end0)
-      const text = zlib.zstdDecompressSync(frame0).toString('utf8')
-      const nl = text.indexOf('\n')
-      const line = nl >= 0 ? text.slice(0, nl) : text
-      const obj = JSON.parse(line)
-      if (obj.type !== 'session') throw new Error(`会话日志格式异常（帧0 不是 session header，实际 type=${obj.type}）`)
-      if (obj.cwd === newCwd) return  // already correct, no rewrite needed
-      obj.cwd = newCwd
-      const newFrame0 = zlib.zstdCompressSync(JSON.stringify(obj) + '\n', CHECKSUM_OPTS)
-      const rest = buf.subarray(end0)
-      writeFileSync(filePath, Buffer.concat([newFrame0, rest]))
-    }
+    // Rewriting frame0's cwd now lives in src/zstd-frame.js so it can be
+    // regression-tested directly. See that module for why frame boundaries are
+    // validated by decompression and why a non-session frame0 is rejected
+    // instead of rewritten.
 
     if (isOpen) {
       // Live session: relocate the on-disk log (rewriting frame0's cwd to the
