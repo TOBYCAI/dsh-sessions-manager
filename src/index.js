@@ -506,12 +506,29 @@ export function apply(ctx) {
     // new workspace without a full re-encode.
     const ZSTD_MAGIC = 4247762216
     const CHECKSUM_OPTS = { params: { [zlib.constants.ZSTD_c_checksumFlag]: 1 } }
-    function rewriteFrame0Cwd(filePath, newCwd) {
-      const buf = readFileSync(filePath)
+    function findZstdFrameStarts(buf) {
+      // Scan for zstd magic number (0xFD2FB528 LE) and validate each candidate
+      // by attempting decompression. This avoids false positives from the magic
+      // bytes appearing inside compressed data.
+      const MAGIC = 0xFD2FB528
       const starts = []
       for (let i = 0; i + 4 <= buf.length; i++) {
-        if (buf.readUInt32LE(i) === ZSTD_MAGIC) starts.push(i)
+        if (buf.readUInt32LE(i) === MAGIC) {
+          // Validate: try to decompress from this offset
+          try {
+            zlib.zstdDecompressSync(buf.subarray(i, i + Math.min(buf.length - i, 1000000)))
+            starts.push(i)
+          } catch (_) {
+            // Not a real frame boundary, skip
+          }
+        }
       }
+      return starts
+    }
+
+    function rewriteFrame0Cwd(filePath, newCwd) {
+      const buf = readFileSync(filePath)
+      const starts = findZstdFrameStarts(buf)
       if (starts.length === 0) throw new Error('会话日志格式异常（无 zstd 帧）')
       const end0 = starts.length > 1 ? starts[1] : buf.length
       const frame0 = buf.subarray(starts[0], end0)
@@ -519,6 +536,7 @@ export function apply(ctx) {
       const nl = text.indexOf('\n')
       const line = nl >= 0 ? text.slice(0, nl) : text
       const obj = JSON.parse(line)
+      if (obj.type !== 'session') throw new Error(`会话日志格式异常（帧0 不是 session header，实际 type=${obj.type}）`)
       if (obj.cwd === newCwd) return  // already correct, no rewrite needed
       obj.cwd = newCwd
       const newFrame0 = zlib.zstdCompressSync(JSON.stringify(obj) + '\n', CHECKSUM_OPTS)
