@@ -11,6 +11,7 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { canDropOnWorkspace, dotStateFor, sessionForNodes, workspaceForNodes } from './logic.js'
 
 export const inject = ['slots']
 
@@ -1263,15 +1264,8 @@ function installSidebarStatusDots() {
       const sd = row.querySelector('[data-state]')
       if (sd) sd.style.display = 'none'
       let dot = row.querySelector('[' + DOT + ']')
-      let color = null
-      if (manualUnread.has(id)) color = COLOR.manual
-      else if (sd) {
-        const st = sd.getAttribute('data-state')
-        if (st === 'running') color = COLOR.running
-        else if (st === 'warning') color = COLOR.feedback
-        else if (st === 'error') color = COLOR.error
-        else if (st === 'done') color = (activeId === id) ? null : COLOR.done
-      }
+      const state = dotStateFor({ manualUnread: manualUnread.has(id), dataState: sd ? sd.getAttribute('data-state') : '', isActive: activeId === id })
+      const color = state ? COLOR[state] : null
       if (!color) { if (dot) dot.remove(); return }
       if (!dot) {
         dot = document.createElement('span')
@@ -1331,28 +1325,12 @@ function installSidebarWorkspaceDrag() {
     }
     return out
   }
-  const sessionForRow = (row) => {
-    for (const node of fiberNodes(row)) {
-      const id = node && node.id != null ? String(node.id) : ''
-      if (sessions.has(id)) return sessions.get(id)
-      // The live DSH row is authoritative even before the async sidebar-state
-      // refresh finishes. Workspace groups use `workspaceId`, never `id`.
-      if (id && node.workspaceId == null && (node.title != null || node.updatedAt != null || node.blank != null)) {
-        return { sessionId: id, title: node.title || '', workspacePath: null }
-      }
-    }
-    return null
-  }
+  const sessionForRow = (row) => sessionForNodes(fiberNodes(row), sessions)
   const workspaceForRow = (row) => {
     // A session row's fiber chain also contains its parent workspace node.
     // Reject it explicitly so only the visible workspace header is a drop zone.
     if (sessionForRow(row)) return null
-    for (const group of fiberNodes(row)) {
-      if (group.workspaceId != null && typeof group.cwd === 'string' && group.cwd) {
-        return { workspaceId: String(group.workspaceId), path: group.cwd, title: group.label || group.cwd }
-      }
-    }
-    return null
+    return workspaceForNodes(fiberNodes(row))
   }
   const eventRow = (event) => {
     for (const item of event.composedPath ? event.composedPath() : []) {
@@ -1404,7 +1382,7 @@ function installSidebarWorkspaceDrag() {
     const row = eventRow(event)
     const target = row && workspaceForRow(row)
     if (!dragging || !target || moving) return
-    if (dragging.workspacePath && target.path === dragging.workspacePath) return
+    if (!canDropOnWorkspace(dragging, target)) return
     event.preventDefault()
     event.stopPropagation()
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
@@ -1415,7 +1393,7 @@ function installSidebarWorkspaceDrag() {
     const row = eventRow(event)
     const item = dragging
     const target = row && workspaceForRow(row)
-    if (!item || !target || moving || (item.workspacePath && target.path === item.workspacePath)) return
+    if (!item || !target || moving || !canDropOnWorkspace(item, target)) return
     event.preventDefault()
     event.stopPropagation()
     moving = true
