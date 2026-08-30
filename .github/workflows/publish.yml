@@ -20,7 +20,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install  # 仓库无 package-lock.json（.gitignore 排除），npm ci 会直接失败
 
       - name: Build
         run: npm run build
