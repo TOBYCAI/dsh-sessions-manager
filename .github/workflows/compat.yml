@@ -6,11 +6,18 @@ on:
   pull_request:
   schedule:
     - cron: '0 4 * * *'   # daily compat check
+  workflow_dispatch:
+
+permissions:
+  contents: write        # 漂移检测成功后提交 runtime-last-seen.json
+  issues: write          # 冒烟失败时开/更新 issue
 
 jobs:
   build:
     name: dsh-plugin build check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -26,3 +33,98 @@ jobs:
         run: git diff --exit-code -- lib
       - name: Verify host bundle loads
         run: node -e "import('./lib/index.js').then(m => { if (m.name !== 'dsh-sessions-manager') process.exit(1); }).catch(e => { console.error(e); process.exit(1); })"
+
+  # 解析 npm 上 @deepseek-ai/dsh 的 dist-tags，得到需要冒烟的 runtime 版本集合
+  resolve-versions:
+    name: resolve runtime versions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.tags.outputs.matrix }}
+      latest: ${{ steps.tags.outputs.latest }}
+    steps:
+      - id: tags
+        run: |
+          DIST=$(npm view @deepseek-ai/dsh dist-tags --json --registry https://registry.npmjs.org)
+          VERSIONS=$(echo "$DIST" | jq -c '[.latest, .next] | unique | map(select(. != null))')
+          echo "latest=$(echo "$DIST" | jq -r .latest)" >> "$GITHUB_OUTPUT"
+          echo "matrix=$VERSIONS" >> "$GITHUB_OUTPUT"
+          echo "runtime versions to smoke: $VERSIONS"
+
+  smoke:
+    name: runtime smoke ${{ matrix.version }}
+    needs: [build, resolve-versions]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJson(needs.resolve-versions.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Compat smoke against real cordis
+        run: node scripts/compat-smoke.mjs "${{ matrix.version }}"
+      - name: Open/update issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = '⚠️ runtime 兼容性冒烟失败（' + process.env.VERSION + '）'
+            const body = [
+              'compat smoke 对 `@deepseek-ai/dsh@' + process.env.VERSION + '` 失败。',
+              'host 的 cordis DI 契约（inject / apply / 路由注册）可能被上游破坏。',
+              '',
+              '本地复现：`node scripts/compat-smoke.mjs ' + process.env.VERSION + '`',
+              'Run: https://github.com/' + process.env.GITHUB_REPOSITORY + '/actions/runs/' + process.env.RUN_ID,
+            ].join('\n')
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', per_page: 100,
+            })
+            const hit = existing.data.find((i) => i.title.includes('runtime 兼容性冒烟失败'))
+            if (hit) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: hit.number, body,
+              })
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: ['compat'],
+              })
+            }
+        env:
+          VERSION: ${{ matrix.version }}
+          RUN_ID: ${{ github.run_id }}
+
+  # 每日检测到 runtime latest 有漂移时提交记录文件（[skip ci] 防循环）
+  track-drift:
+    name: track runtime drift
+    needs: [smoke, resolve-versions]
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bump last-seen version if changed
+        run: |
+          LATEST="${{ needs.resolve-versions.outputs.latest }}"
+          FILE=.github/runtime-last-seen.json
+          if [ -f "$FILE" ] && [ "$(jq -r .latest "$FILE")" = "$LATEST" ]; then
+            echo "runtime latest 未漂移（$LATEST）"
+          else
+            jq -n --arg v "$LATEST" --arg t "$(date -u +%FT%TZ)" '{latest: $v, seenAt: $t}' > "$FILE"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add "$FILE"
+            git commit -m "chore(compat): runtime latest -> $LATEST [skip ci]"
+            git push
+            echo "已记录 runtime 漂移: $LATEST"
+          fi
