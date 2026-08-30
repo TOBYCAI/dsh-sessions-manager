@@ -14,6 +14,12 @@
 
 A persistent DSH plugin (host + browser halves). Starting with v3.0.0, it covers both the **settings panel** and the **main sidebar**, so frequent session actions don't require opening Settings.
 
+## Changelog
+
+- **v3.2.2**: engineering hardening, no behavior change. Sidebar decision logic extracted to `src/client/logic.js` (dot semantics / drop validation / fiber row detection) with 13 new regression tests; CI now smoke-tests each runtime version against real cordis and tracks runtime drift.
+- **v3.2.1**: zstd session-log safety fix (frame-boundary scan mismatching zstd magic inside compressed data).
+- **v3.2.0**: sidebar cross-workspace drag & drop + full session management workbench.
+
 ## What's new in v3.2
 
 - **Cross-workspace sidebar drag-and-drop**: drop a session on a workspace heading to move it. It coexists with DSH's native same-group sorting and provides target highlighting, same-workspace protection, failure feedback, and a keyboard-accessible menu fallback.
