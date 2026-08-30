@@ -15,8 +15,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
+        # Trusted Publishing（OIDC）要求 npm >= 11.5：node 20/22 自带 npm 10.x，
+        # 匿名 PUT 已有包名会被 registry 拒为 404；node 24 自带 npm 11。
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
