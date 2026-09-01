@@ -136,7 +136,7 @@ lib/client.js      预构建 client（ModuleLoader CJS handshake）
 | POST | `/archived-sessions/move` | 把会话移动到目标工作区 `{ sessionId, targetPath }` |
 | POST | `/archived-sessions/details` | 会话详情（磁盘/统计/工具/fetch/文件/血统）`{ sessionId }` |
 | POST | `/archived-sessions/sidebar-state` | 返回侧栏权威标题、回收站 ID 与永久删除墓碑 |
-| POST | `/archived-sessions/star/set` | 收藏 / 取消收藏 `{ sessionId | sessionIds, starred }` |
+| POST | `/archived-sessions/star/set` | 收藏 / 取消收藏 `{ sessionId 或 sessionIds, starred }` |
 | GET | `/archived-sessions/export-md?sessionId=` | 单会话 Markdown 导出（人类可读对话记录） |
 
 > 删除会话默认进入回收站，只有回收站内的「彻底删除」才会物理移除日志。被彻底删除的会话由前端永久隐藏，避免 DSH 运行时缓存使其重新出现在侧栏或「未分组」中。

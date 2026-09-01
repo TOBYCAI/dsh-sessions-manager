@@ -136,7 +136,7 @@ lib/client.js      pre-built client (ModuleLoader CJS handshake)
 | POST | `/archived-sessions/move` | Move a session to a target workspace `{ sessionId, targetPath }` |
 | POST | `/archived-sessions/details` | Session details (disk / stats / tools / fetch / files / lineage) `{ sessionId }` |
 | POST | `/archived-sessions/sidebar-state` | Authoritative sidebar titles, recycle-bin IDs, and permanent-deletion tombstones |
-| POST | `/archived-sessions/star/set` | Star / unstar sessions `{ sessionId | sessionIds, starred }` |
+| POST | `/archived-sessions/star/set` | Star / unstar sessions `{ sessionId or sessionIds, starred }` |
 | GET | `/archived-sessions/export-md?sessionId=` | Single-session Markdown export (human-readable transcript) |
 
 > Deleting a session moves it to the recycle bin by default; only "permanently delete" inside the recycle bin physically removes the log. Permanently deleted sessions are hidden forever on the client side so they don't reappear in the sidebar or "ungrouped" due to DSH runtime caching.
