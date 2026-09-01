@@ -16,8 +16,6 @@ A persistent DSH plugin (host + browser halves). Starting with v3.0.0, it covers
 
 ## Features
 
-## Features
-
 ### Settings panel: Session Manager
 
 - **Unified panel**: five top-level views — **All / Active / Archived / Starred / Recycle bin** — with search across title, session ID, and workspace, plus workspace filters and creation-time/title sorting.
