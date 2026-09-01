@@ -62,13 +62,20 @@
 
 ## 截图
 
+<details>
+<summary>展开查看截图（设置面板 / 已收藏 / 回收站 / 会话详情 / 侧边栏菜单）</summary>
+
 ![主页侧边栏 ⋯ 菜单（标记未读、移动会话、删除会话）](assets/screenshot-session-submenu.png)
 
-![设置面板「会话管理」](assets/screenshot-session-settingsmenu.png)
+![设置面板「会话管理」](assets/screenshot-session-settings.png)
+
+![已收藏（星标）视图](assets/screenshot-session-starred.png)
 
 ![回收站](assets/screenshot-session-trash.png)
 
 ![会话详情（磁盘占用 / 统计 / 工具使用）](assets/screenshot-session-details.png)
+
+</details>
 
 ## 安装
 

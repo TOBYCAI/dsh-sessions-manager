@@ -64,13 +64,20 @@ The plugin hides DSH's own status dot and re-renders it using the palette above,
 
 ## Screenshots
 
+<details>
+<summary>Expand screenshots (settings panel / starred / recycle bin / session details / sidebar menu)</summary>
+
 ![Sidebar ⋯ menu: mark unread, move session, delete session](assets/screenshot-session-submenu.png)
 
-![Settings panel "Session Manager"](assets/screenshot-session-settingsmenu.png)
+![Settings panel "Session Manager"](assets/screenshot-session-settings.png)
+
+![Starred (favorites) view](assets/screenshot-session-starred.png)
 
 ![Recycle bin](assets/screenshot-session-trash.png)
 
 ![Session details: disk usage / stats / tool usage](assets/screenshot-session-details.png)
+
+</details>
 
 ## Install
 
