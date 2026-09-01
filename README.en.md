@@ -14,23 +14,7 @@
 
 A persistent DSH plugin (host + browser halves). Starting with v3.0.0, it covers both the **settings panel** and the **main sidebar**, so frequent session actions don't require opening Settings.
 
-## Changelog
-
-- **v3.3.0**: new **starred sessions** — an always-visible star button on each row and a dedicated "Starred" view, backed by a plugin-owned schema v3 index (reusing the recycle bin's version-migration / serialized-mutation / atomic-write pattern); new **single-session Markdown export** (human-readable transcript, sectioned by turn, with user / assistant / tool-call summaries); the detail panel gains an **export section** whose "Download raw log (ZIP)" action reuses DSH's official `session.export` endpoint (subsessions + attachments included, auto-hidden when the backend lacks raw-artifact support) instead of duplicating it.
-- **v3.2.2**: engineering hardening, no behavior change. Sidebar decision logic extracted to `src/client/logic.js` (dot semantics / drop validation / fiber row detection) with 13 new regression tests; CI now smoke-tests each runtime version against real cordis and tracks runtime drift.
-- **v3.2.1**: zstd session-log safety fix (frame-boundary scan mismatching zstd magic inside compressed data).
-- **v3.2.0**: sidebar cross-workspace drag & drop + full session management workbench.
-
-## What's new in v3.2
-
-- **Cross-workspace sidebar drag-and-drop**: drop a session on a workspace heading to move it. It coexists with DSH's native same-group sorting and provides target highlighting, same-workspace protection, failure feedback, and a keyboard-accessible menu fallback.
-- **Complete session-management workspace**: All / Active / Archived / Recycle bin in one place, with full search, workspace filters, creation-time or title sorting, batch actions, and result counts.
-- **Reliable recycle-bin lifecycle**: soft delete, in-place restore, single permanent purge, empty-all, 7 / 30 / 90-day retention, and log-integrity verification, backed by schema v2, serialized mutations, and atomic writes.
-- **No post-delete resurrection**: permanent purge persists a tombstone first, waits for the live Session and persistence controller to retire, removes the log, and rebuilds workspace indexes so neither sessions nor an empty Ungrouped section reappear.
-- **Archive-state round trips**: a trashed session returns to the active or archived state it had before deletion; concurrent archive and restore mutations are serialized to prevent duplicate IDs, overwrites, and races.
-- **Authoritative cold-start titles**: the latest log-folded `session/title` corrects stale sidebar caches before a renamed session is opened.
-- **Safe migration for open sessions**: moving synchronizes the log header, persistence state, live Session, and WorkspaceRegistry, with backup, verification, and rollback on failure.
-- **Consistent and accessible UI**: tags use DSH's official 4px radius; destructive actions are confirmed, busy / empty / error states are explicit, and every drag action has a keyboard path.
+## Features
 
 ## Features
 
