@@ -11,7 +11,7 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { canDropOnWorkspace, dotStateFor, sessionForNodes, workspaceForNodes } from './logic.js'
+import { canDropOnWorkspace, dotStateFor, sessionForNodes, starredOf, workspaceForNodes } from './logic.js'
 
 export const inject = ['slots']
 
@@ -55,6 +55,11 @@ const CSS = `
 .archv-id{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px;color:var(--dsw-alias-label-tertiary);flex:none}
 .archv-dot{color:var(--dsw-alias-border-l3);flex:none}
 .archv-check{width:15px;height:15px;accent-color:var(--dsw-alias-state-business-primary);flex:none;cursor:pointer}
+.archv-star{appearance:none;width:24px;height:24px;flex:none;display:inline-flex;align-items:center;justify-content:center;border:none;background:0 0;border-radius:7px;cursor:pointer;color:var(--dsw-alias-label-tertiary);transition:color .15s ease,background-color .15s ease}
+.archv-star:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
+.archv-star svg{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linejoin:round}
+.archv-star-on,.archv-star-on:hover{color:var(--dsw-alias-state-business-primary)}
+.archv-star-on svg{fill:currentColor}
 .archv-body{flex:1;min-width:0;display:flex;align-items:center;gap:12px}
 .archv-actions{display:flex;gap:8px;flex:none;flex-wrap:nowrap;justify-content:flex-end}
 .archv-btn{appearance:none;min-height:32px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-secondary);border-radius:9px;font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-align:center;transition:background-color .15s ease,border-color .15s ease,color .15s ease}
@@ -100,6 +105,9 @@ const CSS = `
 .dtl-k{font-size:11px;color:var(--dsw-alias-label-tertiary)}
 .dtl-v{font-size:12px;color:var(--dsw-alias-label-primary);word-break:break-all}
 .dtl-sec{margin-top:12px}
+.dtl-export{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dtl-export .archv-btn{text-decoration:none}
+.dtl-note{margin-top:8px;font-size:11px;color:var(--dsw-alias-label-tertiary);line-height:1.5}
 .dtl-sec-t{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary);text-transform:uppercase;letter-spacing:.03em;margin-bottom:6px}
 .dtl-tags{display:flex;flex-wrap:wrap;gap:6px}
 .dtl-tag{display:inline-flex;font-size:11px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-fill-elevated);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-tag);padding:2px 8px}
@@ -212,7 +220,7 @@ function SessionPanel({ workspacesSvc }) {
   const [sessions, setSessions] = useState(null)
   const [workspaces, setWorkspaces] = useState([])
   const initialPrefs = useRef(loadPanelPrefs()).current
-  const [filter, setFilter] = useState(() => ['all', 'active', 'archived', 'trash'].includes(initialPrefs.filter) ? initialPrefs.filter : 'all')
+  const [filter, setFilter] = useState(() => ['all', 'active', 'archived', 'starred', 'trash'].includes(initialPrefs.filter) ? initialPrefs.filter : 'all')
   const [query, setQuery] = useState('')
   const [workspaceFilter, setWorkspaceFilter] = useState(() => initialPrefs.workspaceFilter || 'all')
   const [sortBy, setSortBy] = useState(() => ['newest', 'oldest', 'title'].includes(initialPrefs.sortBy) ? initialPrefs.sortBy : 'newest')
@@ -235,6 +243,9 @@ function SessionPanel({ workspacesSvc }) {
   const [details, setDetails] = useState({})
   const [openDetails, setOpenDetails] = useState(null)
   const [detailsLoading, setDetailsLoading] = useState(null)
+  const [mdBusy, setMdBusy] = useState(null)
+  const [zipOk, setZipOk] = useState(true)
+  const zipChecked = useRef(false)
   const [openMenu, setOpenMenu] = useState(null)
   const timer = useRef(null)
   const menuRef = useRef(null)
@@ -278,6 +289,53 @@ function SessionPanel({ workspacesSvc }) {
     try { localStorage.setItem(PANEL_PREFS_KEY, JSON.stringify({ filter, workspaceFilter, sortBy })) } catch (e) {}
   }, [filter, workspaceFilter, sortBy])
 
+  // 收藏切换：乐观更新 + 失败回滚（star 是高频轻操作，不等网络往返）。
+  const toggleStar = async (it) => {
+    const next = !it.starred
+    setSessions((s) => s && s.map((x) => (x.sessionId === it.sessionId ? { ...x, starred: next } : x)))
+    try {
+      await postJSON('/archived-sessions/star/set', { sessionId: it.sessionId, starred: next })
+    } catch (e) {
+      setSessions((s) => s && s.map((x) => (x.sessionId === it.sessionId ? { ...x, starred: !next } : x)))
+      showToast('收藏失败：' + String((e && e.message) || e))
+    }
+  }
+
+  // Markdown 导出：自有路由（/archived-sessions/export-md），blob 触发下载。
+  const exportMarkdown = async (it) => {
+    if (mdBusy) return
+    setMdBusy(it.sessionId)
+    try {
+      const res = await fetch('/archived-sessions/export-md?sessionId=' + encodeURIComponent(it.sessionId))
+      if (!res.ok) throw new Error('HTTP ' + res.status)
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'dsh-session-' + it.sessionId + '.md'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      showToast('已导出 Markdown')
+    } catch (e) {
+      showToast('导出失败：' + String((e && e.message) || e))
+    } finally {
+      setMdBusy(null)
+    }
+  }
+
+  // 官方 ZIP 导出预检（一次性）：后端不支持 raw artifacts 时返回 501，
+  // 此时隐藏 ZIP 入口只留 Markdown（全局缓存，后端能力不会中途变）。
+  // 探针用非法 id 走 HEAD：命中 501 = 不支持；404/400 = 路由活着且支持。
+  useEffect(() => {
+    if (openDetails === null || zipChecked.current) return
+    zipChecked.current = true
+    fetch('/api/session.export?sessionId=probe&includeDescendants=false', { method: 'HEAD' })
+      .then((res) => setZipOk(res.status !== 501))
+      .catch(() => setZipOk(true))
+  }, [openDetails])
+
   // Close the ⋯ menu on outside click / Escape (no full-screen backdrop).
   useEffect(() => {
     if (openMenu === null) return
@@ -314,9 +372,10 @@ function SessionPanel({ workspacesSvc }) {
 
   const archivedList = sessions ? sessions.filter((x) => x.archived) : []
   const activeList = sessions ? sessions.filter((x) => !x.archived) : []
+  const starredList = starredOf(sessions)
   const list = useMemo(() => {
     if (filter === 'trash') return []
-    const base = filter === 'archived' ? archivedList : filter === 'active' ? activeList : sessions || []
+    const base = filter === 'archived' ? archivedList : filter === 'active' ? activeList : filter === 'starred' ? starredList : sessions || []
     const needle = query.trim().toLocaleLowerCase()
     const filtered = base.filter((item) => {
       if (workspaceFilter !== 'all' && (item.workspacePath || '') !== workspaceFilter) return false
@@ -569,6 +628,7 @@ function SessionPanel({ workspacesSvc }) {
             <button type="button" role="tab" aria-selected={filter === 'all'} className={'sess-fbtn' + (filter === 'all' ? ' sess-fbtn-on' : '')} onClick={() => { setFilter('all'); clearSel(); setConfirmBatch(false) }}>全部 ({sessions.length})</button>
             <button type="button" role="tab" aria-selected={filter === 'active'} className={'sess-fbtn' + (filter === 'active' ? ' sess-fbtn-on' : '')} onClick={() => { setFilter('active'); clearSel(); setConfirmBatch(false) }}>活动 ({activeList.length})</button>
             <button type="button" role="tab" aria-selected={filter === 'archived'} className={'sess-fbtn' + (filter === 'archived' ? ' sess-fbtn-on' : '')} onClick={() => { setFilter('archived'); clearSel(); setConfirmBatch(false) }}>已归档 ({archivedList.length})</button>
+            <button type="button" role="tab" aria-selected={filter === 'starred'} className={'sess-fbtn' + (filter === 'starred' ? ' sess-fbtn-on' : '')} onClick={() => { setFilter('starred'); clearSel(); setConfirmBatch(false) }}>已收藏 ({starredList.length})</button>
             <button type="button" role="tab" aria-selected={filter === 'trash'} className={'sess-fbtn' + (filter === 'trash' ? ' sess-fbtn-on' : '')} onClick={() => { setFilter('trash'); clearSel(); setConfirmBatch(false) }}>回收站 ({trash.length})</button>
           </div>
 
@@ -593,13 +653,13 @@ function SessionPanel({ workspacesSvc }) {
                   </select>
                 </div>
               </div>
-              <div className="sess-results" role="status">显示 {list.length} 个会话{query || workspaceFilter !== 'all' ? `，共 ${filter === 'archived' ? archivedList.length : filter === 'active' ? activeList.length : sessions.length} 个` : ''}</div>
+              <div className="sess-results" role="status">显示 {list.length} 个会话{query || workspaceFilter !== 'all' ? `，共 ${filter === 'archived' ? archivedList.length : filter === 'active' ? activeList.length : filter === 'starred' ? starredList.length : sessions.length} 个` : ''}</div>
             </>
           )}
 
           {filter !== 'trash' && list.length > 0 && (
             <div className="sess-batch">
-              <span className="sess-btntext">{selIds.length ? `已选 ${selIds.length} 项` : (filter === 'archived' ? `共 ${archivedList.length} 个归档会话` : `共 ${sessions.length} 个会话（活动 ${activeList.length} / 已归档 ${archivedList.length}）`)}</span>
+              <span className="sess-btntext">{selIds.length ? `已选 ${selIds.length} 项` : (filter === 'archived' ? `共 ${archivedList.length} 个归档会话` : filter === 'starred' ? `共 ${starredList.length} 个收藏会话` : `共 ${sessions.length} 个会话（活动 ${activeList.length} / 已归档 ${archivedList.length}）`)}</span>
               <button type="button" className="archv-btn" disabled={list.length === 0} onClick={selectAll}>全选</button>
               {selIds.length > 0 && (
                 <>
@@ -619,7 +679,7 @@ function SessionPanel({ workspacesSvc }) {
           )}
 
           {filter !== 'trash' && list.length === 0 ? (
-            <div className="archv-empty">{query || workspaceFilter !== 'all' ? '没有匹配的会话。请调整搜索词或工作区筛选。' : filter === 'archived' ? '目前没有归档会话。在“全部”里选中会话点“归档”即可收纳进来。' : filter === 'active' ? '目前没有活动会话。' : '暂无可管理的会话。'}</div>
+            <div className="archv-empty">{query || workspaceFilter !== 'all' ? '没有匹配的会话。请调整搜索词或工作区筛选。' : filter === 'archived' ? '目前没有归档会话。在“全部”里选中会话点“归档”即可收纳进来。' : filter === 'active' ? '目前没有活动会话。' : filter === 'starred' ? '还没有收藏的会话。点击会话左侧的星标即可收藏。' : '暂无可管理的会话。'}</div>
           ) : filter !== 'trash' ? (
             <div className="archv-list" role="list">
               {list.map((it) => {
@@ -635,6 +695,16 @@ function SessionPanel({ workspacesSvc }) {
                         onChange={() => toggle(it.sessionId)}
                         aria-label={'选择 ' + (it.title || it.sessionId)}
                       />
+                      <button
+                        type="button"
+                        className={'archv-star' + (it.starred ? ' archv-star-on' : '')}
+                        aria-pressed={!!it.starred}
+                        aria-label={(it.starred ? '取消收藏 ' : '收藏 ') + (it.title || it.sessionId)}
+                        title={it.starred ? '取消收藏' : '收藏'}
+                        onClick={(e) => { e.stopPropagation(); toggleStar(it) }}
+                      >
+                        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false"><path d="M12 2.5l2.9 5.9 6.6.9-4.8 4.6 1.2 6.5-5.9-3.1-5.9 3.1 1.2-6.5L2.5 9.3l6.6-.9z" /></svg>
+                      </button>
                       <div className="archv-body">
                         <div className="archv-main">
                           <div className="archv-name" title={it.title || ''}>{it.title || '(无标题)'}</div>
@@ -746,6 +816,20 @@ function SessionPanel({ workspacesSvc }) {
                                   </div>
                                 </div>
                               )}
+                              <div className="dtl-sec">
+                                <div className="dtl-sec-t">导出</div>
+                                <div className="dtl-export">
+                                  <a
+                                    className="archv-btn"
+                                    href={`/api/session.export?sessionId=${encodeURIComponent(it.sessionId)}&includeDescendants=true`}
+                                    onClick={(e) => e.stopPropagation()}
+                                    style={zipOk ? undefined : { pointerEvents: 'none', opacity: 0.45 }}
+                                    title={zipOk ? '含子会话与附件，由 DSH 提供' : '当前持久化后端不支持原始日志导出'}
+                                  >下载原始日志 (ZIP)</a>
+                                  <button type="button" className="archv-btn" disabled={mdBusy === it.sessionId} onClick={() => exportMarkdown(it)}>{mdBusy === it.sessionId ? '生成中…' : '导出 Markdown'}</button>
+                                </div>
+                                <div className="dtl-note">ZIP 含子会话与附件，由 DSH 提供 · Markdown 为本插件生成的可读对话记录</div>
+                              </div>
                             </div>
                           )
                         })()}

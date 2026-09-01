@@ -84,3 +84,28 @@ test('rejects workspace nodes without a string cwd', () => {
   assert.equal(workspaceForNodes([{ workspaceId: 'ws1' }]), null)
   assert.equal(workspaceForNodes([]), null)
 })
+
+// ---- starredOf：收藏过滤 ----------------------------------------------------
+import { starredOf } from '../src/client/logic.js'
+
+test('starredOf returns only starred items and tolerates junk', () => {
+  const items = [
+    { sessionId: 'a', starred: true },
+    { sessionId: 'b', starred: false },
+    { sessionId: 'c' },
+    null,
+    { sessionId: 'd', starred: true },
+  ]
+  assert.deepEqual(starredOf(items).map((x) => x.sessionId), ['a', 'd'])
+  assert.deepEqual(starredOf(null), [])
+  assert.deepEqual(starredOf(undefined), [])
+})
+
+test('starredOf is orthogonal to archive state', () => {
+  const items = [
+    { sessionId: 'arch-starred', archived: true, starred: true },
+    { sessionId: 'arch', archived: true, starred: false },
+  ]
+  // star 是用户标记，归档会话同样可以出现在收藏里。
+  assert.deepEqual(starredOf(items).map((x) => x.sessionId), ['arch-starred'])
+})

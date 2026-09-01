@@ -12,6 +12,8 @@ import { basename, dirname, isAbsolute, join } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { rewriteFrame0Cwd } from './zstd-frame.js'
+import { renderSessionMarkdown } from './markdown.js'
+import { createStarIndex } from './star-index.js'
 
 export const name = 'dsh-sessions-manager'
 export const inject = ['webServer', 'workspaceRegistry', 'sessionPersistence', 'sessionQuery', 'storageDomain']
@@ -226,6 +228,21 @@ export function apply(ctx) {
     return operation
   }
 
+  // ---- Starred sessions (收藏, schema v3) -----------------------------------
+  // User marks, kept in the plugin's own index (never touches DSH logs). Stars
+  // survive archive & soft-delete — both are reversible — and are dropped only
+  // when the session is really gone (purge, or externally removed; the latter
+  // is caught by gcStars during list builds).
+  const stars = createStarIndex()
+  async function gcStars(validIds) {
+    try {
+      const store = await stars.read()
+      const valid = new Set(validIds.map(String))
+      const gone = store.starredSessionIds.filter((id) => !valid.has(id))
+      if (gone.length) await stars.removeIds(gone)
+    } catch (e) { /* best-effort */ }
+  }
+
   // Soft-delete one session: record it in the recycle-bin index but KEEP its
   // log in the original workspace directory. Moving the file out (and detaching
   // it from the workspace) orphaned the session into DSH's "未分组" group and
@@ -364,6 +381,7 @@ export function apply(ctx) {
       purged = true
     })
     if (!purged) throw new Error('彻底删除失败')
+    stars.removeIds([sid]).catch(() => {})
     return { ok: true, purged: true }
   }
 
@@ -644,9 +662,11 @@ export function apply(ctx) {
   async function allSessionItems() {
     let materialized = new Set()
     let live = ctx.get('sessions')
+    let headersOk = false
     try {
       const headers = await sp.list()
       materialized = new Set(headers.map((h) => String(h.id)))
+      headersOk = true
     } catch (e) { /* best-effort */ }
     const ids = []
     try { for (const header of await sp.list()) ids.push(String(header.id)) } catch (e) { /* ignore */ }
@@ -668,6 +688,12 @@ export function apply(ctx) {
       const res2 = await Promise.all(visibleIds.slice(i, i + CHUNK).map(resolveOne))
       for (const it of res2) items.push({ ...it, archived: currentArchived.has(it.sessionId) })
     }
+    // Annotate stars; GC only when we have a trustworthy id baseline, so a
+    // failing sp.list() can never wipe the whole index.
+    let starredSet = new Set()
+    try { starredSet = new Set((await stars.read()).starredSessionIds) } catch (e) {}
+    for (const it of items) it.starred = starredSet.has(String(it.sessionId))
+    if (headersOk) await gcStars(ids)
     return items
   }
 
@@ -1045,6 +1071,57 @@ export function apply(ctx) {
           json(res, { items: await allSessionItems() })
         } catch (e) {
           json(res, { error: String((e && e.message) || e) }, 500)
+        }
+      },
+    }))
+
+    // Star / unstar one or many sessions (收藏, schema v3).
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/star/set',
+      handler: async (req, res) => {
+        try {
+          const body = await readJsonBody(req)
+          const starred = !!(body && body.starred)
+          let ids = parseIds(body)
+          if ((!ids || ids.length === 0) && body && typeof body.sessionId === 'string') {
+            ids = isSafeSessionId(body.sessionId) ? [body.sessionId] : null
+          }
+          if (!ids || ids.length === 0) return json(res, { ok: false, error: 'missing sessionId' }, 400)
+          const starredSessionIds = await stars.setStarred(ids, starred)
+          json(res, { ok: true, starredSessionIds })
+        } catch (e) {
+          json(res, { ok: false, error: String((e && e.message) || e) }, errorStatus(e))
+        }
+      },
+    }))
+
+    // Human-readable Markdown export (one session). Raw-log ZIP export is
+    // dsh's own GET /api/session.export — we deliberately do not duplicate it
+    // (see reports/HANDOFF-dsh-sessions-manager-roadmap.md §2.4).
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/export-md',
+      handler: async (req, res) => {
+        try {
+          const url = new URL(req.url, 'http://localhost')
+          const sid = url.searchParams.get('sessionId')
+          requireSessionId(sid)
+          const r = await sp.readFrom(sid, 0)
+          if (!r || !r.meta) {
+            const error = new Error('无法读取该会话的日志')
+            error.status = 404
+            throw error
+          }
+          const md = renderSessionMarkdown({ ...r.meta, id: sid }, r.events || [])
+          res.writeHead(200, {
+            'content-type': 'text/markdown; charset=utf-8',
+            'content-disposition': `attachment; filename="dsh-session-${sid}.md"`,
+            'cache-control': 'no-store',
+          })
+          res.end(md)
+        } catch (e) {
+          json(res, { error: String((e && e.message) || e) }, errorStatus(e))
         }
       },
     }))

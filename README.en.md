@@ -16,6 +16,7 @@ A persistent DSH plugin (host + browser halves). Starting with v3.0.0, it covers
 
 ## Changelog
 
+- **v3.3.0**: new **starred sessions** — an always-visible star button on each row and a dedicated "Starred" view, backed by a plugin-owned schema v3 index (reusing the recycle bin's version-migration / serialized-mutation / atomic-write pattern); new **single-session Markdown export** (human-readable transcript, sectioned by turn, with user / assistant / tool-call summaries); the detail panel gains an **export section** whose "Download raw log (ZIP)" action reuses DSH's official `session.export` endpoint (subsessions + attachments included, auto-hidden when the backend lacks raw-artifact support) instead of duplicating it.
 - **v3.2.2**: engineering hardening, no behavior change. Sidebar decision logic extracted to `src/client/logic.js` (dot semantics / drop validation / fiber row detection) with 13 new regression tests; CI now smoke-tests each runtime version against real cordis and tracks runtime drift.
 - **v3.2.1**: zstd session-log safety fix (frame-boundary scan mismatching zstd magic inside compressed data).
 - **v3.2.0**: sidebar cross-workspace drag & drop + full session management workbench.
@@ -35,12 +36,14 @@ A persistent DSH plugin (host + browser halves). Starting with v3.0.0, it covers
 
 ### Settings panel: Session Manager
 
-- **Unified panel**: four top-level views — **All / Active / Archived / Recycle bin** — with search across title, session ID, and workspace, plus workspace filters and creation-time/title sorting.
+- **Unified panel**: five top-level views — **All / Active / Archived / Starred / Recycle bin** — with search across title, session ID, and workspace, plus workspace filters and creation-time/title sorting.
+- **Starred sessions**: an always-visible star button on each session row toggles starring optimistically with rollback on failure; the Starred view is orthogonal to DSH's active/archived states and they stack. The star index is plugin-owned (schema v3) and never touches DSH logs; stars are cleaned up automatically when a session is permanently purged.
 - **Cold-title synchronization**: the sidebar is corrected from the latest log-backed `session/title`, so renamed cold sessions no longer need to be opened before showing their current name.
 - **Sidebar workspace drag-and-drop**: drag a session onto a workspace heading to move it, with a highlighted drop target, same-workspace protection, failure feedback, and the More → Move session menu retained for keyboard access.
 - **Archive / Restore**: archive hides a session from the sidebar; restore unarchives it and puts it back into its original workspace group.
 - **Move to a workspace**: pick an **existing workspace**, or enter a **new directory path** (auto-created); the new-path mode also lets you open the **native OS directory picker** with a **「浏览…」** button. The session's working directory and log are migrated together, and even an open session can be moved safely.
 - **Session details**: expand any session to see **disk usage**, **turns / steps / user·assistant messages / tool calls / image attachments** stats, **tool-usage breakdown**, **search·fetch records**, the **write/edit file list** (already filtered for paths that no longer exist on disk), and **lineage** (parent session / child sessions / subagents).
+- **Export**: the detail panel offers two actions — "**Download raw log (ZIP)**" goes straight to DSH's official `session.export` endpoint (subsessions + attachments included, hidden automatically when the persistence backend lacks raw-artifact support); "**Export Markdown**" renders the session into a human-readable transcript (front matter + per-turn sections + user / assistant / tool-call summaries, with no streaming-delta duplication).
 - **Batch multi-select**: select-all / archive selected / restore selected / delete selected (single confirmation for batch delete).
 
 ### Main sidebar: session ⋯ menu augmentation
@@ -144,6 +147,8 @@ lib/client.js      pre-built client (ModuleLoader CJS handshake)
 | POST | `/archived-sessions/move` | Move a session to a target workspace `{ sessionId, targetPath }` |
 | POST | `/archived-sessions/details` | Session details (disk / stats / tools / fetch / files / lineage) `{ sessionId }` |
 | POST | `/archived-sessions/sidebar-state` | Authoritative sidebar titles, recycle-bin IDs, and permanent-deletion tombstones |
+| POST | `/archived-sessions/star/set` | Star / unstar sessions `{ sessionId | sessionIds, starred }` |
+| GET | `/archived-sessions/export-md?sessionId=` | Single-session Markdown export (human-readable transcript) |
 
 > Deleting a session moves it to the recycle bin by default; only "permanently delete" inside the recycle bin physically removes the log. Permanently deleted sessions are hidden forever on the client side so they don't reappear in the sidebar or "ungrouped" due to DSH runtime caching.
 

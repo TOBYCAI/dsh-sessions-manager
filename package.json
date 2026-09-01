@@ -1,7 +1,7 @@
 {
   "name": "dsh-sessions-manager",
   "description": "DSH 设置面板会话管理器：归档 / 恢复 / 彻底删除 / 移动到其他工作区，带工作区标签与会话日期；统一「会话管理」面板。Session manager for the DeepSeek Harness settings panel — archive / restore / permanently delete / move sessions across workspaces, with workspace tags & session dates in one unified panel.",
-  "version": "3.2.2",
+  "version": "3.3.0",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

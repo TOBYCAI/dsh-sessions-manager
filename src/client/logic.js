@@ -51,3 +51,9 @@ export function workspaceForNodes(nodes) {
   }
   return null
 }
+
+// 收藏过滤：返回已收藏子集。star 是用户标记，与 DSH 的活动/归档状态正交
+// （可叠加），所以这里不做任何状态联合判断，只认 starred 字段。
+export function starredOf(items) {
+  return (items || []).filter((item) => item && item.starred)
+}
