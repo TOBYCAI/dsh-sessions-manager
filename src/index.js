@@ -14,6 +14,9 @@ import { homedir } from 'node:os'
 import { rewriteFrame0Cwd } from './zstd-frame.js'
 import { renderSessionMarkdown } from './markdown.js'
 import { createStarIndex } from './star-index.js'
+import { aggregateStorage } from './storage-stats.js'
+import { createAutoArchiveStore, pickInactiveCandidates } from './auto-archive.js'
+
 
 export const name = 'dsh-sessions-manager'
 export const inject = ['webServer', 'workspaceRegistry', 'sessionPersistence', 'sessionQuery', 'storageDomain']
@@ -29,6 +32,7 @@ const DEFAULT_TRASH_SETTINGS = Object.freeze({ retentionDays: 0 })
 const FETCH_TOOL_RE = /search|fetch|download|browse/i
 const MAX_FETCHES = 12   // fetch 记录上限（防响应过大）
 const MAX_FILES = 20     // write/edit 文件列表上限
+const MAX_STORAGE_TOP = 50 // 存储排行返回上限（防响应过大）
 
 function json(res, value, status = 200) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
@@ -153,7 +157,7 @@ export function apply(ctx) {
 
   let wsByPath = {}
 
-  async function resolveOne(id) {
+  async function resolveOne(id, usage) {
     let title = null, createdAt = null, cwd = null
     try {
       const o = await sq.readTitleSnapshot(id)
@@ -175,7 +179,7 @@ export function apply(ctx) {
     const ws = cwd ? wsByPath[cwd] : undefined
     const workspaceGone = !!(cwd && !ws)
     const display = title ? (String(title).length > MAX_TITLE ? String(title).slice(0, MAX_TITLE) + '…' : String(title)) : null
-    return {
+    const base = {
       sessionId: id,
       title: display,
       createdAt: createdAt || null,
@@ -184,6 +188,45 @@ export function apply(ctx) {
       workspaceGone: workspaceGone ? true : false,
       hasWorkspace: !!cwd,
     }
+    // sizeBytes / updatedAt are opt-in: they cost one stat() per session, so
+    // the high-frequency list routes stay exactly as cheap as before.
+    if (usage) {
+      if (usage.sizeById && usage.sizeById.has(id)) base.sizeBytes = usage.sizeById.get(id)
+      if (usage.mtimeById && usage.mtimeById.has(id)) base.updatedAt = usage.mtimeById.get(id)
+    }
+    return base
+  }
+
+  // Disk usage + last-write time for every session, in one pass.
+  //
+  // sp.locate(header) resolves the log file behind a session header; a single
+  // stat() then yields both its size and its mtime. mtime doubles as the
+  // session's last-activity time — appending an event rewrites the log, so the
+  // file's last write tracks the conversation's last turn. It errs safe: a log
+  // we relocated (move) gets a fresh mtime and therefore looks *more* active
+  // than it is, which can only delay an auto-archive, never cause a wrong one.
+  async function collectUsage() {
+    const sizeById = new Map()
+    const mtimeById = new Map()
+    let headers = []
+    try { headers = await sp.list() } catch (e) { headers = [] }
+    if (!Array.isArray(headers)) headers = []
+    const CHUNK = 8
+    for (let i = 0; i < headers.length; i += CHUNK) {
+      await Promise.all(headers.slice(i, i + CHUNK).map(async (header) => {
+        const id = header && header.id != null ? String(header.id) : null
+        if (!id) return
+        try {
+          const loc = sp.locate(header)
+          if (!loc || typeof loc.path !== 'string' || !loc.path) return
+          const st = await stat(loc.path)
+          if (!st) return
+          if (typeof st.size === 'number') sizeById.set(id, st.size)
+          if (typeof st.mtimeMs === 'number' && st.mtimeMs > 0) mtimeById.set(id, Math.floor(st.mtimeMs))
+        } catch (e) { /* best-effort: an unreadable log just stays unknown */ }
+      }))
+    }
+    return { sizeById, mtimeById }
   }
 
   // Restore (unarchive) one session; throws on failure.
@@ -234,6 +277,9 @@ export function apply(ctx) {
   // when the session is really gone (purge, or externally removed; the latter
   // is caught by gcStars during list builds).
   const stars = createStarIndex()
+  // Auto-archive settings live in their own schema-v4 store, off by default.
+  const autoArchive = createAutoArchiveStore()
+
   async function gcStars(validIds) {
     try {
       const store = await stars.read()
@@ -659,7 +705,9 @@ export function apply(ctx) {
     })
   }
 
-  async function allSessionItems() {
+  // opts.usage: fill sizeBytes + updatedAt (one stat() per session). Off by
+  // default so the panel's list route keeps its original cost.
+  async function allSessionItems(opts = {}) {
     let materialized = new Set()
     let live = ctx.get('sessions')
     let headersOk = false
@@ -683,9 +731,12 @@ export function apply(ctx) {
     try { for (const ent of w.list()) wsByPath[ent.path] = ent } catch (e) { wsByPath = {} }
     const currentArchived = new Set((await archivedState().catch(() => ({ archivedSessionIds: [] }))).archivedSessionIds || [])
     const items = []
+    const usage = (opts && opts.usage) ? await collectUsage() : null
     const CHUNK = 6
     for (let i = 0; i < visibleIds.length; i += CHUNK) {
-      const res2 = await Promise.all(visibleIds.slice(i, i + CHUNK).map(resolveOne))
+      // Arrow wrapper on purpose: Array#map passes (value, index, array), and
+      // resolveOne's second argument is the usage map.
+      const res2 = await Promise.all(visibleIds.slice(i, i + CHUNK).map((id) => resolveOne(id, usage)))
       for (const it of res2) items.push({ ...it, archived: currentArchived.has(it.sessionId) })
     }
     // Annotate stars; GC only when we have a trustworthy id baseline, so a
@@ -695,6 +746,52 @@ export function apply(ctx) {
     for (const it of items) it.starred = starredSet.has(String(it.sessionId))
     if (headersOk) await gcStars(ids)
     return items
+  }
+
+  // ---- Storage usage + auto-archive ---------------------------------------
+
+  // Read-only rollup: per-workspace totals plus the largest sessions. The
+  // aggregation itself is a pure function (src/storage-stats.js).
+  async function buildStorage(opts = {}) {
+    const items = await allSessionItems({ usage: true })
+    const raw = Number(opts && opts.topN)
+    const topN = Number.isInteger(raw) && raw > 0 ? Math.min(raw, MAX_STORAGE_TOP) : 10
+    return aggregateStorage(items, { topN })
+  }
+
+  // Archive conversations that have been idle past the configured window.
+  //
+  // Deliberately lazy — there is no timer. The sweep runs when the panel reads
+  // its settings (and on demand), at most once a day: a background interval
+  // would keep the host process alive and would archive conversations while
+  // nobody is looking at the panel.
+  async function autoArchiveSweep(opts = {}) {
+    const store = await autoArchive.read()
+    const days = store.settings.inactiveDays
+    if (!days) return { ok: true, skipped: 'disabled', archived: 0 }
+    const now = Date.now()
+    if (!(opts && opts.force) && autoArchive.isFresh(store, now)) {
+      return { ok: true, skipped: 'throttled', archived: 0, lastRunAt: store.lastRunAt, lastArchivedCount: store.lastArchivedCount }
+    }
+    const items = await allSessionItems({ usage: true })
+    const candidates = pickInactiveCandidates(items, {
+      inactiveDays: days,
+      skipStarred: store.settings.skipStarred,
+      activeSessionId: getActiveSessionId(ctx),
+      now,
+    })
+    let archived = 0
+    const failed = []
+    for (const sid of candidates) {
+      try {
+        const result = await archiveOne(sid)
+        if (result && result.archived) archived++
+      } catch (e) {
+        failed.push({ sessionId: sid, error: String((e && e.message) || e) })
+      }
+    }
+    await autoArchive.recordRun(archived, now)
+    return { ok: true, archived, candidates: candidates.length, failed, lastRunAt: now }
   }
 
   async function sidebarAuthority() {
@@ -881,7 +978,7 @@ export function apply(ctx) {
           const items = []
           const CHUNK = 6
           for (let i = 0; i < idStrs.length; i += CHUNK) {
-            const res2 = await Promise.all(idStrs.slice(i, i + CHUNK).map(resolveOne))
+            const res2 = await Promise.all(idStrs.slice(i, i + CHUNK).map((id) => resolveOne(id)))
             items.push.apply(items, res2)
           }
           json(res, { items })
@@ -1226,6 +1323,65 @@ export function apply(ctx) {
           json(res, await buildDetails(sid))
         } catch (e) {
           json(res, { error: String((e && e.message) || e) }, (e && e.status) ? e.status : 500)
+        }
+      },
+    }))
+
+    // Storage usage rollup (read-only): per-workspace totals + largest sessions.
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/storage',
+      handler: async (req, res) => {
+        try {
+          const body = await readJsonBody(req)
+          json(res, await buildStorage({ topN: body && body.topN }))
+        } catch (e) {
+          json(res, { error: String((e && e.message) || e) }, 500)
+        }
+      },
+    }))
+
+    // Auto-archive settings. A plain read (no patch keys) doubles as the lazy
+    // sweep trigger — that is how the once-a-day cleanup gets a chance to run
+    // without a background timer.
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/auto-archive/settings',
+      handler: async (req, res) => {
+        try {
+          const body = await readJsonBody(req)
+          const patch = {}
+          if (body && Object.prototype.hasOwnProperty.call(body, 'inactiveDays')) patch.inactiveDays = body.inactiveDays
+          if (body && Object.prototype.hasOwnProperty.call(body, 'skipStarred')) patch.skipStarred = body.skipStarred
+          const settings = Object.keys(patch).length
+            ? await autoArchive.update(patch)
+            : (await autoArchive.read()).settings
+          const sweep = await autoArchiveSweep()
+          const store = await autoArchive.read()
+          json(res, {
+            ok: true,
+            settings,
+            lastRunAt: store.lastRunAt,
+            lastArchivedCount: store.lastArchivedCount,
+            sweep,
+          })
+        } catch (e) {
+          json(res, { ok: false, error: String((e && e.message) || e) }, errorStatus(e))
+        }
+      },
+    }))
+
+    // Run the auto-archive sweep right now, ignoring the once-a-day throttle.
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/auto-archive/run',
+      handler: async (req, res) => {
+        try {
+          const sweep = await autoArchiveSweep({ force: true })
+          const store = await autoArchive.read()
+          json(res, { ok: true, ...sweep, settings: store.settings, lastRunAt: store.lastRunAt, lastArchivedCount: store.lastArchivedCount })
+        } catch (e) {
+          json(res, { ok: false, error: String((e && e.message) || e) }, 500)
         }
       },
     }))

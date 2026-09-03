@@ -18,7 +18,7 @@
 
 ### 设置面板：会话管理
 
-- **统一面板**：顶部提供「全部 / 活动 / 已归档 / 已收藏 / 回收站」五个视图，支持按标题、会话 ID、工作区搜索，按工作区筛选，并按创建时间或标题排序。
+- **统一面板**：顶部提供「全部 / 活动 / 已归档 / 已收藏 / 回收站」五个视图，支持按标题、会话 ID、工作区搜索，按工作区筛选，并按创建时间或标题排序。筛选栏下方另有一行维护栏，收纳「自动归档」与「存储占用」两个按需展开的工具，不占用视图位置。
 - **收藏（星标）**：会话行左侧常驻星标按钮，单击即收藏 / 取消（乐观更新、失败回滚）；「已收藏」视图与 DSH 的活动 / 归档状态正交、可叠加；收藏索引为插件自有 schema v3，不触碰 DSH 日志，会话被彻底删除时自动清理。
 - **冷态标题同步**：侧栏使用日志中最新的 `session/title` 修正冷启动缓存，改名后的会话无需先打开即可显示新名称。
 - **侧栏跨工作区拖拽**：直接把会话拖到目标工作区标题即可切换工作区；目标高亮、同工作区拦截、失败反馈，并保留“更多 → 移动会话”作为键盘操作入口。
@@ -26,6 +26,8 @@
 - **移动到工作区**：任选**已有工作区**或**新建目录路径**（自动创建），新建目录支持点击 **「浏览…」** 调用系统目录选择窗口。会话的工作目录与日志一起迁移；即使会话处于打开状态也可安全移动。
 - **会话详情**：展开单条会话查看**磁盘占用**、**轮次 / 步骤 / 用户·助手消息 / 工具调用 / 图片附件**统计、**工具使用分布**、**搜索·抓取记录**、**write/edit 写过的文件列表**（已过滤磁盘上已不存在的路径），以及**血统**（父会话 / 子会话 / 子代理）。
 - **导出**：详情面板底部提供两个入口——「**下载原始日志 (ZIP)**」直接走 DSH 官方 `session.export` 端点（含子会话与附件，持久化后端不支持时自动隐藏）；「**导出 Markdown**」由本插件把会话渲染为人类可读对话记录（front matter + 按轮分节 + 用户 / 助手 / 工具调用摘要，流式增量不重复）。
+- **存储占用分析**：维护栏的「存储占用」按钮按需展开，按工作区聚合会话日志的磁盘占用（占比条 + 会话数），并列出占用最大的会话 Top 10。纯只读统计，不修改任何数据；默认收起、展开时才统计，因此不会拖慢会话列表的加载。
+- **自动归档**：可设为把 **30 / 60 / 90 天未活跃**的会话自动收进「已归档」，**默认关闭**。当前正在使用的会话与已收藏的会话（该保护可关闭）永不自动归档；只做归档标记，不删除任何数据，随时可恢复。检查在打开面板时惰性触发，每天最多一次，也可点「立即检查」手动执行。
 - **批量多选**：全选 / 批量归档 / 恢复所选 / 删除所选（批量删除一次二次确认）。
 
 ### 主页侧边栏：会话 ⋯ 菜单增强
@@ -63,11 +65,15 @@
 ## 截图
 
 <details>
-<summary>展开查看截图（设置面板 / 已收藏 / 回收站 / 会话详情 / 侧边栏菜单）</summary>
+<summary>展开查看截图（设置面板 / 自动归档 / 存储占用 / 已收藏 / 回收站 / 会话详情 / 侧边栏菜单）</summary>
 
 ![主页侧边栏 ⋯ 菜单（标记未读、移动会话、删除会话）](assets/screenshot-session-submenu.png)
 
 ![设置面板「会话管理」](assets/screenshot-session-settings.png)
+
+![自动归档面板（维护栏内联展开）](assets/screenshot-session-autoarch.png)
+
+![存储占用分析（维护栏内联展开）](assets/screenshot-session-storage.png)
 
 ![已收藏（星标）视图](assets/screenshot-session-starred.png)
 
@@ -107,6 +113,8 @@ package.json       npm 元数据 + dsh.bundle.patch + dsh.client（浏览器半�
 cordis.patch.yml   向 profile bundle 插入本插件行
 src/index.js       host 源码（/archived-sessions/* JSON 路由）
 src/client/index.jsx  client 源码（React，settings.section + 侧栏 DOM 增强）
+src/auto-archive.js   自动归档设置（schema v4）+ 候选判定纯函数
+src/storage-stats.js  存储占用聚合（纯函数，按工作区 / Top N）
 build.mjs          esbuild 构建脚本（本地开发时生成 lib/）
 lib/index.js       预构建 host（ESM）
 lib/client.js      预构建 client（ModuleLoader CJS handshake）
@@ -138,6 +146,9 @@ lib/client.js      预构建 client（ModuleLoader CJS handshake）
 | POST | `/archived-sessions/sidebar-state` | 返回侧栏权威标题、回收站 ID 与永久删除墓碑 |
 | POST | `/archived-sessions/star/set` | 收藏 / 取消收藏 `{ sessionId 或 sessionIds, starred }` |
 | GET | `/archived-sessions/export-md?sessionId=` | 单会话 Markdown 导出（人类可读对话记录） |
+| POST | `/archived-sessions/storage` | 存储占用聚合（按工作区排行 + 最大的会话）`{ topN }` |
+| POST | `/archived-sessions/auto-archive/settings` | 读取或更新自动归档策略 `{ inactiveDays, skipStarred }`；读取时惰性触发每日检查 |
+| POST | `/archived-sessions/auto-archive/run` | 立即执行一次自动归档检查（忽略每日节流） |
 
 > 删除会话默认进入回收站，只有回收站内的「彻底删除」才会物理移除日志。被彻底删除的会话由前端永久隐藏，避免 DSH 运行时缓存使其重新出现在侧栏或「未分组」中。
 

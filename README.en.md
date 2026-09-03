@@ -18,7 +18,7 @@ A persistent DSH plugin (host + browser halves). Starting with v3.0.0, it covers
 
 ### Settings panel: Session Manager
 
-- **Unified panel**: five top-level views — **All / Active / Archived / Starred / Recycle bin** — with search across title, session ID, and workspace, plus workspace filters and creation-time/title sorting.
+- **Unified panel**: five top-level views — **All / Active / Archived / Starred / Recycle bin** — with search across title, session ID, and workspace, plus workspace filters and creation-time/title sorting. A maintenance row below the filters holds the **Auto-archive** and **Storage usage** tools, which expand on demand instead of taking up a view.
 - **Starred sessions**: an always-visible star button on each session row toggles starring optimistically with rollback on failure; the Starred view is orthogonal to DSH's active/archived states and they stack. The star index is plugin-owned (schema v3) and never touches DSH logs; stars are cleaned up automatically when a session is permanently purged.
 - **Cold-title synchronization**: the sidebar is corrected from the latest log-backed `session/title`, so renamed cold sessions no longer need to be opened before showing their current name.
 - **Sidebar workspace drag-and-drop**: drag a session onto a workspace heading to move it, with a highlighted drop target, same-workspace protection, failure feedback, and the More → Move session menu retained for keyboard access.
@@ -26,6 +26,8 @@ A persistent DSH plugin (host + browser halves). Starting with v3.0.0, it covers
 - **Move to a workspace**: pick an **existing workspace**, or enter a **new directory path** (auto-created); the new-path mode also lets you open the **native OS directory picker** with a **「浏览…」** button. The session's working directory and log are migrated together, and even an open session can be moved safely.
 - **Session details**: expand any session to see **disk usage**, **turns / steps / user·assistant messages / tool calls / image attachments** stats, **tool-usage breakdown**, **search·fetch records**, the **write/edit file list** (already filtered for paths that no longer exist on disk), and **lineage** (parent session / child sessions / subagents).
 - **Export**: the detail panel offers two actions — "**Download raw log (ZIP)**" goes straight to DSH's official `session.export` endpoint (subsessions + attachments included, hidden automatically when the persistence backend lacks raw-artifact support); "**Export Markdown**" renders the session into a human-readable transcript (front matter + per-turn sections + user / assistant / tool-call summaries, with no streaming-delta duplication).
+- **Storage analysis**: a **Storage usage** button in the maintenance row expands on demand to aggregate per-workspace disk usage of session logs (share bars + session counts) and list the Top 10 largest sessions. Read-only statistics that never modify any data; collapsed by default, so nothing is scanned until you open it.
+- **Auto-archive**: optionally move sessions that have been **inactive for 30 / 60 / 90 days** into **Archived**, **off by default**. The session you are currently using and any starred session (that guard can be turned off) are never auto-archived; it only sets an archived flag and never deletes data, so recovery is always one click away. The check is lazily triggered when you open the panel, at most once per day, and can also be run manually with "Check now".
 - **Batch multi-select**: select-all / archive selected / restore selected / delete selected (single confirmation for batch delete).
 
 ### Main sidebar: session ⋯ menu augmentation
@@ -63,11 +65,15 @@ The plugin hides DSH's own status dot and re-renders it using the palette above,
 ## Screenshots
 
 <details>
-<summary>Expand screenshots (settings panel / starred / recycle bin / session details / sidebar menu)</summary>
+<summary>Expand screenshots (settings panel / auto-archive / storage analysis / starred / recycle bin / session details / sidebar menu)</summary>
 
 ![Sidebar ⋯ menu: mark unread, move session, delete session](assets/screenshot-session-submenu.png)
 
 ![Settings panel "Session Manager"](assets/screenshot-session-settings.png)
+
+![Auto-archive panel (inline sheet in the maintenance bar)](assets/screenshot-session-autoarch.png)
+
+![Storage analysis (inline sheet in the maintenance bar)](assets/screenshot-session-storage.png)
 
 ![Starred (favorites) view](assets/screenshot-session-starred.png)
 
@@ -107,6 +113,8 @@ package.json       npm metadata + dsh.bundle.patch + dsh.client (browser-half re
 cordis.patch.yml   inserts this plugin's row into the profile bundle
 src/index.js       host source (/archived-sessions/* JSON routes)
 src/client/index.jsx  client source (React, settings.section + sidebar DOM augmentation)
+src/auto-archive.js   auto-archive settings (schema v4) + candidate-selection pure functions
+src/storage-stats.js  storage-usage aggregation (pure functions, by workspace / Top N)
 build.mjs          esbuild build script (regenerates lib/)
 lib/index.js       pre-built host (ESM)
 lib/client.js      pre-built client (ModuleLoader CJS handshake)
@@ -138,6 +146,9 @@ lib/client.js      pre-built client (ModuleLoader CJS handshake)
 | POST | `/archived-sessions/sidebar-state` | Authoritative sidebar titles, recycle-bin IDs, and permanent-deletion tombstones |
 | POST | `/archived-sessions/star/set` | Star / unstar sessions `{ sessionId or sessionIds, starred }` |
 | GET | `/archived-sessions/export-md?sessionId=` | Single-session Markdown export (human-readable transcript) |
+| POST | `/archived-sessions/storage` | Storage-usage aggregation (per-workspace ranking + largest sessions) `{ topN }` |
+| POST | `/archived-sessions/auto-archive/settings` | Read or update the auto-archive policy `{ inactiveDays, skipStarred }`; reading lazily triggers the daily check |
+| POST | `/archived-sessions/auto-archive/run` | Run a one-off auto-archive check immediately (ignores the daily throttle) |
 
 > Deleting a session moves it to the recycle bin by default; only "permanently delete" inside the recycle bin physically removes the log. Permanently deleted sessions are hidden forever on the client side so they don't reappear in the sidebar or "ungrouped" due to DSH runtime caching.
 

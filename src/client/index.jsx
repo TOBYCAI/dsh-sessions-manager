@@ -220,6 +220,8 @@ function SessionPanel({ workspacesSvc }) {
   const [sessions, setSessions] = useState(null)
   const [workspaces, setWorkspaces] = useState([])
   const initialPrefs = useRef(loadPanelPrefs()).current
+  // 注意：'storage' 已从可持久化取值中移除（它不再是视图），旧版残留的
+  // filter='storage' 会自动回落到 'all'，避免落到一个已不存在的界面。
   const [filter, setFilter] = useState(() => ['all', 'active', 'archived', 'starred', 'trash'].includes(initialPrefs.filter) ? initialPrefs.filter : 'all')
   const [query, setQuery] = useState('')
   const [workspaceFilter, setWorkspaceFilter] = useState(() => initialPrefs.workspaceFilter || 'all')
@@ -245,9 +247,21 @@ function SessionPanel({ workspacesSvc }) {
   const [detailsLoading, setDetailsLoading] = useState(null)
   const [mdBusy, setMdBusy] = useState(null)
   const [zipOk, setZipOk] = useState(true)
+  const [storage, setStorage] = useState(null)
+  const [storageBusy, setStorageBusy] = useState(false)
+  // 存储统计要 stat 每条会话日志，开销不小：面板默认收起、按需加载，
+  // 且展开状态刻意不持久化——否则每次打开设置面板都会触发一次全量扫描。
+  const [storageOpen, setStorageOpen] = useState(false)
+  const [storageError, setStorageError] = useState(null)
+  const [aa, setAa] = useState({ settings: { inactiveDays: 0, skipStarred: true }, lastRunAt: null, lastArchivedCount: 0 })
+  const [aaOpen, setAaOpen] = useState(false)
+  const [aaBusy, setAaBusy] = useState(false)
   const zipChecked = useRef(false)
   const [openMenu, setOpenMenu] = useState(null)
   const timer = useRef(null)
+  // 存储面板关着时会话集合若发生变化，标脏；下次展开时再刷新，
+  // 既不会显示过期数字，也避免每次 refresh 都白扫一遍全量日志。
+  const storageDirty = useRef(false)
   const menuRef = useRef(null)
   const dialogRef = useRef(null)
 
@@ -275,6 +289,9 @@ function SessionPanel({ workspacesSvc }) {
         setConfirmBatch(false)
         if (!targetWs && works.items && works.items.length) setTargetWs(works.items[0].workspaceId)
         loadTrash()
+        // 会话集合变了：面板开着就同步刷新；关着则只标脏，等展开时再刷。
+        if (storageOpen) loadStorage()
+        else storageDirty.current = true
       })
       .catch((e) => setError(String((e && e.message) || e)))
   }
@@ -288,6 +305,13 @@ function SessionPanel({ workspacesSvc }) {
   useEffect(() => {
     try { localStorage.setItem(PANEL_PREFS_KEY, JSON.stringify({ filter, workspaceFilter, sortBy })) } catch (e) {}
   }, [filter, workspaceFilter, sortBy])
+
+  // 自动归档设置随面板加载一次（host 侧读取即触发每日检查）。
+  // 存储统计刻意不在这里预取：它要 stat 每条日志，只在用户展开面板时才算。
+  useEffect(() => {
+    loadAutoArchive()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // 收藏切换：乐观更新 + 失败回滚（star 是高频轻操作，不等网络往返）。
   const toggleStar = async (it) => {
@@ -389,6 +413,8 @@ function SessionPanel({ workspacesSvc }) {
     })
   }, [sessions, filter, query, workspaceFilter, sortBy])
   const selIds = Object.keys(selected).filter((k) => selected[k])
+  // 「回收站」是独立视图，不共用会话列表。
+  const showSessionList = filter !== 'trash'
 
   const toggle = (id) => setSelected((s) => ({ ...s, [id]: !s[id] }))
   const clearSel = () => setSelected({})
@@ -443,6 +469,47 @@ function SessionPanel({ workspacesSvc }) {
     postJSON('/archived-sessions/trash/verify', {})
       .then((r) => { setTrashBusy(null); setTrashCheck(r); showToast(r.missing ? `发现 ${r.missing} 条日志缺失` : '回收站校验通过') })
       .catch((e) => { setTrashBusy(null); setError(String((e && e.message) || e)) })
+  }
+
+  // 存储占用分析：只读聚合（按工作区排行 + 最大的会话）。按需调用，不在面板加载时预取。
+  const loadStorage = () => {
+    setStorageBusy(true)
+    setStorageError(null)
+    postJSON('/archived-sessions/storage', { topN: 10 })
+      .then((r) => { setStorageBusy(false); setStorage(r); storageDirty.current = false })
+      // 错误留在面板内自行重试，不冒泡成整个设置面板的错误条。
+      .catch((e) => { setStorageBusy(false); setStorageError(String((e && e.message) || e)) })
+  }
+
+  // 自动归档设置。一次纯读取会顺带让 host 跑一遍每日检查（host 侧按天节流）。
+  const applyAa = (r) => setAa({ settings: r.settings || { inactiveDays: 0, skipStarred: true }, lastRunAt: r.lastRunAt ?? null, lastArchivedCount: r.lastArchivedCount || 0 })
+
+  const loadAutoArchive = () => {
+    postJSON('/archived-sessions/auto-archive/settings', {})
+      .then(applyAa)
+      .catch(() => {})
+  }
+
+  const updateAutoArchive = (patch) => {
+    if (aaBusy) return
+    setAaBusy(true)
+    postJSON('/archived-sessions/auto-archive/settings', patch)
+      .then((r) => { setAaBusy(false); applyAa(r); showToast('已更新自动归档策略') })
+      .catch((e) => { setAaBusy(false); setError(String((e && e.message) || e)) })
+  }
+
+  const runAutoArchive = () => {
+    if (aaBusy) return
+    setAaBusy(true)
+    postJSON('/archived-sessions/auto-archive/run', {})
+      .then((r) => {
+        setAaBusy(false)
+        applyAa(r)
+        const n = r.archived || 0
+        if (r.skipped === 'disabled') showToast('自动归档未启用')
+        else { showToast(`已自动归档 ${n} 个会话`); if (n > 0) refresh() }
+      })
+      .catch((e) => { setAaBusy(false); setError(String((e && e.message) || e)) })
   }
 
   const restoreTrash = (sid) => {
@@ -632,7 +699,97 @@ function SessionPanel({ workspacesSvc }) {
             <button type="button" role="tab" aria-selected={filter === 'trash'} className={'sess-fbtn' + (filter === 'trash' ? ' sess-fbtn-on' : '')} onClick={() => { setFilter('trash'); clearSel(); setConfirmBatch(false) }}>回收站 ({trash.length})</button>
           </div>
 
-          {filter !== 'trash' && (
+          {/* 维护栏是面板级工具，与当前查看哪一组会话无关，故所有视图都显示。 */}
+          <div className="maint-bar">
+              <button type="button" className={'archv-btn' + (aa.settings.inactiveDays ? ' archv-go' : '')} aria-expanded={aaOpen} onClick={() => setAaOpen(!aaOpen)}>
+                自动归档{aa.settings.inactiveDays ? `：${aa.settings.inactiveDays} 天未活跃` : '：未启用'}
+              </button>
+              {aa.lastRunAt ? <span className="maint-note">上次检查 {fmtDate(aa.lastRunAt)}，归档 {aa.lastArchivedCount} 个</span> : <span className="maint-note">尚未检查</span>}
+              <button type="button" className="archv-btn maint-bar-right" aria-expanded={storageOpen} onClick={() => { const next = !storageOpen; setStorageOpen(next); if (next && (!storage || storageDirty.current) && !storageBusy) loadStorage() }}>
+                存储占用{storage ? ` · ${fmtBytes(storage.totalBytes) || '0 B'}` : ''}
+              </button>
+          </div>
+          {aaOpen && (
+            <div className="mv-sheet" aria-label="自动归档设置">
+              <div className="mv-sheet-head">
+                <h3 className="mv-sheet-title">自动归档</h3>
+                <button type="button" className="mv-sheet-close" aria-label="关闭" onClick={() => setAaOpen(false)}>×</button>
+              </div>
+              <div className="mv-field">
+                <label className="mv-field-label" htmlFor="dsm-aa-days">将多久未活跃的会话自动归档</label>
+                <select id="dsm-aa-days" value={aa.settings.inactiveDays} disabled={aaBusy} onChange={(e) => updateAutoArchive({ inactiveDays: Number(e.target.value) })}>
+                  <option value="0">不自动归档</option>
+                  <option value="30">30 天未活跃</option>
+                  <option value="60">60 天未活跃</option>
+                  <option value="90">90 天未活跃</option>
+                </select>
+              </div>
+              <label className="aa-check">
+                <input type="checkbox" checked={aa.settings.skipStarred !== false} disabled={aaBusy} onChange={(e) => updateAutoArchive({ skipStarred: e.target.checked })} />
+                跳过已收藏的会话
+              </label>
+              <div className="mv-foot">
+                <button type="button" className="archv-btn" disabled={aaBusy || !aa.settings.inactiveDays} onClick={runAutoArchive}>{aaBusy ? '检查中…' : '立即检查'}</button>
+              </div>
+              <div className="dtl-note">
+                自动归档只是把会话收进「已归档」，不删除任何数据，随时可恢复。当前正在使用的会话永远不会被自动归档。检查在打开本面板时触发，每天最多一次。
+              </div>
+            </div>
+          )}
+          {storageOpen && (
+            <div className="mv-sheet" aria-label="存储占用">
+              <div className="mv-sheet-head">
+                <h3 className="mv-sheet-title">存储占用</h3>
+                <div className="mv-sheet-actions">
+                  <button type="button" className="archv-btn" disabled={storageBusy} onClick={loadStorage}>{storageBusy ? '统计中…' : '重新统计'}</button>
+                  <button type="button" className="mv-sheet-close" aria-label="关闭" onClick={() => setStorageOpen(false)}>×</button>
+                </div>
+              </div>
+              {storageError ? (
+                <div className="archv-err" role="alert">
+                  <span>{storageError}</span>
+                  <button type="button" className="archv-errretry" onClick={loadStorage}>重试</button>
+                </div>
+              ) : !storage ? (
+                <div className="archv-empty">统计中…</div>
+              ) : storage.sessionCount === 0 ? (
+                <div className="archv-empty">暂无会话，没有可统计的存储占用。</div>
+              ) : (
+                <>
+                  <div className="dsm-storage-sum">
+                    共 {fmtBytes(storage.totalBytes) || '0 B'} · {storage.sessionCount} 个会话{storage.unknownSessions ? ` · ${storage.unknownSessions} 个大小未知` : ''}
+                  </div>
+                  <div className="dsm-storage-list">
+                    {storage.workspaces.map((w) => (
+                      <div className="dsm-storage-row" key={w.key}>
+                        <span className="dsm-storage-name" title={w.path || '未分组'}>{w.title || (w.path ? pathName(w.path) : '未分组')}</span>
+                        <span className="dsm-storage-bar" aria-hidden="true"><span className="dsm-storage-fill" style={{ width: `${Math.round((w.share || 0) * 100)}%` }} /></span>
+                        <span className="dsm-storage-size">{fmtBytes(w.bytes) || '—'}</span>
+                        <span className="dsm-storage-count">{w.sessions} 个</span>
+                      </div>
+                    ))}
+                  </div>
+                  {storage.top.length > 0 && (
+                    <div className="dtl-sec">
+                      <div className="dtl-sec-t">占用最大的会话</div>
+                      <div className="dsm-storage-list">
+                        {storage.top.map((s) => (
+                          <div className="dsm-storage-row" key={s.sessionId}>
+                            <span className="dsm-storage-name" title={s.sessionId}>{s.title || s.sessionId}</span>
+                            <span className="dsm-storage-size">{fmtBytes(s.sizeBytes) || '—'}</span>
+                            <span className="dsm-storage-count">{s.workspaceTitle || (s.workspacePath ? pathName(s.workspacePath) : '未分组')}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <div className="dtl-note">统计的是会话日志文件的磁盘占用（压缩后的实际大小），只读，不修改任何数据。</div>
+                </>
+              )}
+            </div>
+          )}
+
+          {showSessionList && (
             <>
               <div className="sess-tools" aria-label="查找和整理会话">
                 <div className="sess-field">
@@ -657,7 +814,7 @@ function SessionPanel({ workspacesSvc }) {
             </>
           )}
 
-          {filter !== 'trash' && list.length > 0 && (
+          {showSessionList && list.length > 0 && (
             <div className="sess-batch">
               <span className="sess-btntext">{selIds.length ? `已选 ${selIds.length} 项` : (filter === 'archived' ? `共 ${archivedList.length} 个归档会话` : filter === 'starred' ? `共 ${starredList.length} 个收藏会话` : `共 ${sessions.length} 个会话（活动 ${activeList.length} / 已归档 ${archivedList.length}）`)}</span>
               <button type="button" className="archv-btn" disabled={list.length === 0} onClick={selectAll}>全选</button>
@@ -678,9 +835,9 @@ function SessionPanel({ workspacesSvc }) {
             </div>
           )}
 
-          {filter !== 'trash' && list.length === 0 ? (
+          {showSessionList && list.length === 0 ? (
             <div className="archv-empty">{query || workspaceFilter !== 'all' ? '没有匹配的会话。请调整搜索词或工作区筛选。' : filter === 'archived' ? '目前没有归档会话。在“全部”里选中会话点“归档”即可收纳进来。' : filter === 'active' ? '目前没有活动会话。' : filter === 'starred' ? '还没有收藏的会话。点击会话左侧的星标即可收藏。' : '暂无可管理的会话。'}</div>
-          ) : filter !== 'trash' ? (
+          ) : showSessionList ? (
             <div className="archv-list" role="list">
               {list.map((it) => {
                 const date = fmtDate(it.createdAt)
@@ -703,7 +860,7 @@ function SessionPanel({ workspacesSvc }) {
                         title={it.starred ? '取消收藏' : '收藏'}
                         onClick={(e) => { e.stopPropagation(); toggleStar(it) }}
                       >
-                        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false"><path d="M12 2.5l2.9 5.9 6.6.9-4.8 4.6 1.2 6.5-5.9-3.1-5.9 3.1 1.2-6.5L2.5 9.3l6.6-.9z" /></svg>
+                        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M12 2.5l2.9 5.9 6.6.9-4.8 4.6 1.2 6.5-5.9-3.1-5.9 3.1 1.2-6.5L2.5 9.3l6.6-.9z" /></svg>
                       </button>
                       <div className="archv-body">
                         <div className="archv-main">
@@ -960,6 +1117,21 @@ const SIDEBAR_AUG_CSS = `
 .dsm-trash-date{font-size:11px;color:var(--dsw-alias-label-tertiary);flex:none;white-space:nowrap}
 .dsm-trash-actions{display:flex;gap:6px;flex:none}.dsm-trash-actions .archv-btn{min-width:72px}
 .dsm-trash-empty{font-size:12px;color:var(--dsw-alias-label-tertiary);padding:6px 2px}
+.dsm-storage-sum{font-size:12px;color:var(--dsw-alias-label-secondary);margin-bottom:10px}
+.dsm-storage-list{display:flex;flex-direction:column;gap:6px}
+.dsm-storage-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-fill-elevated)}
+.dsm-storage-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--dsw-alias-label-primary)}
+.dsm-storage-bar{flex:0 0 96px;height:6px;border-radius:999px;background:var(--dsw-alias-fill-subtle);overflow:hidden}
+.dsm-storage-fill{display:block;height:100%;border-radius:999px;background:var(--dsw-alias-state-business-primary)}
+.dsm-storage-size{font-size:12px;color:var(--dsw-alias-label-secondary);flex:none;white-space:nowrap}
+.dsm-storage-count{font-size:11px;color:var(--dsw-alias-label-tertiary);flex:none;white-space:nowrap;max-width:32%;overflow:hidden;text-overflow:ellipsis}
+.maint-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 8px}
+.maint-bar-right{margin-left:auto}
+.maint-note{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.mv-sheet-actions{display:flex;align-items:center;gap:6px}
+.aa-check{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dsw-alias-label-secondary);cursor:pointer}
+.aa-check input{width:15px;height:15px;accent-color:var(--dsw-alias-state-business-primary);cursor:pointer;flex:none}
+@media (max-width:640px){.dsm-storage-bar{display:none}.dsm-storage-count{max-width:40%}}
 `
 
 // Shared status-dot state so the ⋯-menu "标记未读" action can toggle the
