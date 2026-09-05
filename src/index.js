@@ -16,7 +16,8 @@ import { renderSessionMarkdown } from './markdown.js'
 import { createStarIndex } from './star-index.js'
 import { aggregateStorage } from './storage-stats.js'
 import { createAutoArchiveStore, pickInactiveCandidates } from './auto-archive.js'
-import { createSessionMetaCache } from './session-meta-cache.js'
+import { createSessionMetaCache, fingerprintOf } from './session-meta-cache.js'
+import { createTitleIndexStore } from './title-persist-index.js'
 
 
 export const name = 'dsh-sessions-manager'
@@ -128,6 +129,44 @@ export function apply(ctx) {
   // 见 src/session-meta-cache.js 的说明：列表构建原本每条会话都要整本解压日志，
   // 这个缓存让「日志没变」的会话直接跳过解码。
   const metaCache = createSessionMetaCache()
+  // 持久标题索引（冷启动加速）：metaCache 是进程内的，重启即空——第一次列表
+  // 仍要全库解码。索引按同样的 (mtime, size) 指纹存解码结果，指纹没变的会话
+  // 重启后也直接复用。见 src/title-persist-index.js。
+  const titleIndex = createTitleIndexStore({ dir: TRASH_DIR, file: join(TRASH_DIR, 'title-index.json') })
+
+  // P4：对「内存缓存未命中」的会话查持久索引，指纹一致才可信。
+  // 返回 Map<id, meta>；调用方应把命中条目回填 metaCache 并从 missing 里剔除。
+  async function hydrateFromPersist(ids, statsById) {
+    const hits = new Map()
+    if (!ids || !ids.length) return hits
+    let store
+    try { store = await titleIndex.entries() } catch (e) { return hits }
+    for (const id of ids) {
+      const stat = statsById.get(id)
+      const entry = store && store[id]
+      if (!stat || !entry) continue
+      const fp = fingerprintOf(stat)
+      if (fp && entry.fingerprint === fp) {
+        hits.set(id, { title: entry.title, cwd: entry.cwd, createdAt: entry.createdAt })
+      }
+    }
+    return hits
+  }
+
+  // 把本批真正解码出的元数据异步回写持久索引（fire-and-forget：索引只是
+  // 加速器，写失败不影响响应，队列内部已串行化 + 原子替换）。
+  function persistDecoded(decoded, statsById) {
+    if (!decoded || !decoded.size) return
+    const batch = {}
+    const now = Date.now()
+    for (const [id, meta] of decoded) {
+      const fp = fingerprintOf(statsById.get(id))
+      if (!fp) continue
+      batch[id] = { title: meta.title, cwd: meta.cwd, createdAt: meta.createdAt, fingerprint: fp, updatedAt: now }
+    }
+    if (!Object.keys(batch).length) return
+    titleIndex.merge(batch).catch(() => {})
+  }
 
   // 从投影快照里抽出元数据；快照缺失/异常时返回零值 meta（调用方决定兜底）。
   function metaFromSnapshot(o) {
@@ -239,6 +278,8 @@ export function apply(ctx) {
       } catch (e2) { /* keep what we have */ }
     }
     metaCache.set(key, statInfo, meta)
+    // 本条是「真解码」出来的：交给调用方回写持久标题索引（P4 冷启动加速）。
+    if (opts.collectDecoded && statInfo) opts.collectDecoded(key, meta)
     return buildItem(key, meta, usage, opts.exposeUsage)
   }
 
@@ -805,7 +846,13 @@ export function apply(ctx) {
     // 先按指纹把「缓存命中」与「需要解码」分开，只对后者做批量投影。
     const statsById = new Map(visibleIds.map((id) => [id, { mtimeMs: usage.mtimeById.get(id), size: usage.sizeById.get(id) }]))
     const { cached, missing } = metaCache.partition(visibleIds, statsById)
-    const snapshotById = await projectTitles(missing)
+    // P4：missing 里先查持久标题索引（冷启动跳过整本解码），命中的回填内存缓存。
+    const persisted = await hydrateFromPersist(missing, statsById)
+    for (const [id, meta] of persisted) metaCache.set(id, statsById.get(id), meta)
+    const stillMissing = missing.filter((id) => !persisted.has(id))
+    const snapshotById = await projectTitles(stillMissing)
+    const decoded = new Map()
+    const collectDecoded = (id, meta) => { decoded.set(id, meta) }
     const CHUNK = 6
     for (let i = 0; i < visibleIds.length; i += CHUNK) {
       // Arrow wrapper on purpose: Array#map passes (value, index, array), and
@@ -813,9 +860,11 @@ export function apply(ctx) {
       const res2 = await Promise.all(visibleIds.slice(i, i + CHUNK).map((id) => resolveOne(id, usage, {
         exposeUsage: !!(opts && opts.usage),
         preloaded: snapshotById.has(id) ? snapshotById.get(id) : undefined,
+        collectDecoded,
       })))
       for (const it of res2) items.push({ ...it, archived: currentArchived.has(it.sessionId) })
     }
+    persistDecoded(decoded, statsById)
     // Annotate stars; GC only when we have a trustworthy id baseline, so a
     // failing sp.list() can never wipe the whole index.
     let starredSet = new Set()
@@ -889,19 +938,27 @@ export function apply(ctx) {
       const usage = await collectUsage(headers)
       const statsById = new Map(ids.map((id) => [id, { mtimeMs: usage.mtimeById.get(id), size: usage.sizeById.get(id) }]))
       const { cached, missing } = metaCache.partition(ids, statsById)
-      const snapshotById = await projectTitles(missing)
+      // P4：与列表构建共用持久标题索引，冷启动零解码。
+      const persisted = await hydrateFromPersist(missing, statsById)
+      for (const [id, meta] of persisted) metaCache.set(id, statsById.get(id), meta)
+      const rest = missing.filter((id) => !persisted.has(id))
+      const snapshotById = await projectTitles(rest)
+      const decoded = new Map()
+      const collectDecoded = (id, meta) => { decoded.set(id, meta) }
       for (const id of ids) {
-        let meta = cached.get(id) || null
+        let meta = cached.get(id) || persisted.get(id) || null
         if (!meta) {
           const snapshot = snapshotById.has(id)
             ? snapshotById.get(id)
             : (typeof sq.readTitleSnapshot === 'function' ? await sq.readTitleSnapshot(id).catch(() => null) : null)
           const next = metaFromSnapshot(snapshot)
           metaCache.set(id, statsById.get(id), next)
+          if (statsById.get(id)) collectDecoded(id, next)
           meta = next
         }
         if (meta && meta.title) authorityTitleCache.set(id, String(meta.title))
       }
+      persistDecoded(decoded, statsById)
     }
     return {
       titles: Object.fromEntries(authorityTitleCache),
@@ -1226,6 +1283,8 @@ export function apply(ctx) {
           if (!sid) return json(res, { ok: false, error: 'missing sessionId' }, 400)
           const out = await purgeFromTrash(sid)
           metaCache.invalidate(sid)
+          // 彻底删除：持久标题索引里的条目一并清掉（issue #1 P4）。
+          titleIndex.remove([sid]).catch(() => {})
           json(res, out)
         } catch (e) {
           json(res, { ok: false, error: String((e && e.message) || e) }, 500)
@@ -1243,7 +1302,7 @@ export function apply(ctx) {
           if (!ids || ids.length === 0) return json(res, { ok: false, error: 'missing sessionIds' }, 400)
           const results = []
           for (const sid of ids) {
-            try { results.push({ sessionId: sid, ok: true, ...(await purgeFromTrash(sid)) }); metaCache.invalidate(sid) }
+            try { results.push({ sessionId: sid, ok: true, ...(await purgeFromTrash(sid)) }); metaCache.invalidate(sid); titleIndex.remove([sid]).catch(() => {}) }
             catch (e) { results.push({ sessionId: sid, ok: false, error: String((e && e.message) || e) }) }
           }
           json(res, { ok: true, purged: results.filter((r) => r.ok).length, results })
@@ -1440,7 +1499,10 @@ export function apply(ctx) {
 
     // Auto-archive settings. A plain read (no patch keys) doubles as the lazy
     // sweep trigger — that is how the once-a-day cleanup gets a chance to run
-    // without a background timer.
+    // without a background timer. The sweep runs in the background so opening
+    // the panel never waits on it (P5, issue #1): the sweep itself already
+    // reuses the metadata caches, and this keeps the settings read latency
+    // independent of library size.
     disposers.push(ctx.webServer.register({
       kind: 'exact',
       path: '/archived-sessions/auto-archive/settings',
@@ -1450,10 +1512,20 @@ export function apply(ctx) {
           const patch = {}
           if (body && Object.prototype.hasOwnProperty.call(body, 'inactiveDays')) patch.inactiveDays = body.inactiveDays
           if (body && Object.prototype.hasOwnProperty.call(body, 'skipStarred')) patch.skipStarred = body.skipStarred
-          const settings = Object.keys(patch).length
+          const isPatch = Object.keys(patch).length > 0
+          const settings = isPatch
             ? await autoArchive.update(patch)
             : (await autoArchive.read()).settings
-          const sweep = await autoArchiveSweep()
+          let sweep
+          if (isPatch) {
+            // 显式保存设置：保持「保存即生效」的同步 sweep（含刚启用时的首次归档）。
+            sweep = await autoArchiveSweep()
+          } else {
+            // 面板打开的纯读取：sweep 转后台执行，打开延迟与库大小解耦
+            //（P5，issue #1）。sweep 本身已复用元数据缓存 + 持久标题索引。
+            void autoArchiveSweep().catch(() => {})
+            sweep = { triggered: true }
+          }
           const store = await autoArchive.read()
           json(res, {
             ok: true,

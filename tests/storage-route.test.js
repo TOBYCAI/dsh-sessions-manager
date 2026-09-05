@@ -135,7 +135,9 @@ test('auto-archive does nothing until it is enabled', async () => {
   const result = await call('/archived-sessions/auto-archive/settings', {})
   assert.equal(result.status, 200)
   assert.equal(result.body.settings.inactiveDays, 0)
-  assert.equal(result.body.sweep.skipped, 'disabled')
+  // A plain read fires the sweep in the background (P5); with disabled
+  // settings it is a guaranteed no-op either way.
+  assert.equal(result.body.sweep.triggered, true)
   assert.deepEqual(domainState.archivedSessionIds, [])
 })
 
@@ -216,9 +218,16 @@ test('the lazy sweep is throttled to once a day', async () => {
   // A forced run records lastRunAt; the next plain read must skip the sweep.
   const forced = await call('/archived-sessions/auto-archive/run', {})
   assert.equal(forced.body.archived, 1)
+  const lastRunAt = forced.body.lastRunAt
+  // The plain read fires its (throttled) sweep in the background (P5): the
+  // settings response returns immediately, and the sweep must not archive
+  // anything new nor bump the recorded run.
   const read = await call('/archived-sessions/auto-archive/settings', {})
-  assert.equal(read.body.sweep.skipped, 'throttled')
+  assert.equal(read.body.sweep.triggered, true)
+  assert.equal(read.body.lastRunAt, lastRunAt)
+  await new Promise((resolve) => setTimeout(resolve, 50))
   assert.equal(read.body.lastArchivedCount, 1)
+  assert.deepEqual(domainState.archivedSessionIds, ['old-1'])
   // force still overrides the throttle.
   const again = await call('/archived-sessions/auto-archive/run', {})
   assert.equal(again.body.candidates, 0)
