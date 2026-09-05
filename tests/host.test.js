@@ -63,6 +63,15 @@ async function call(path, body = {}) {
   return { status, body: JSON.parse(text) }
 }
 
+test('reports the runtime action capabilities used by the UI', async () => {
+  const result = await call('/archived-sessions/capabilities')
+  assert.equal(result.status, 200)
+  assert.equal(result.body.persistence, 'legacy')
+  assert.equal(result.body.actions.read.available, true)
+  assert.equal(result.body.actions.purge.available, true)
+  assert.equal(typeof result.body.actions.move.reason === 'string' || result.body.actions.move.available, true)
+})
+
 test('reads a legacy trash array through schema v2 API', async () => {
   const result = await call('/archived-sessions/trash/list')
   assert.equal(result.status, 200)

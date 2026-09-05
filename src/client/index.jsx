@@ -219,6 +219,7 @@ function installSettingsNavIcons(ctx) {
 function SessionPanel({ workspacesSvc }) {
   const [sessions, setSessions] = useState(null)
   const [workspaces, setWorkspaces] = useState([])
+  const [capabilities, setCapabilities] = useState(null)
   const initialPrefs = useRef(loadPanelPrefs()).current
   // 注意：'storage' 已从可持久化取值中移除（它不再是视图），旧版残留的
   // filter='storage' 会自动回落到 'all'，避免落到一个已不存在的界面。
@@ -276,14 +277,16 @@ function SessionPanel({ workspacesSvc }) {
     Promise.all([
       postJSON('/archived-sessions/sessions', {}),
       postJSON('/archived-sessions/workspaces', {}),
+      postJSON('/archived-sessions/capabilities', {}),
     ])
-      .then(([s, works]) => {
+      .then(([s, works, caps]) => {
         // Permanently-purged sessions must never re-appear here, even if DSH's
         // in-memory session index still lists them after the file was unlinked.
         const purged = dsmLoadPurged()
         const visible = (s.items || []).filter((x) => !purged.has(String(x.sessionId)))
         setSessions(visible)
         setWorkspaces(works.items || [])
+        setCapabilities(caps || null)
         setSelected({})
         setDelTarget(null)
         setConfirmBatch(false)
@@ -393,6 +396,9 @@ function SessionPanel({ workspacesSvc }) {
     const w = workspaces.find((x) => x.workspaceId === id)
     return w ? w.path : ''
   }
+  const actionCapability = (name) => (capabilities && capabilities.actions && capabilities.actions[name]) || { available: false, reason: '正在检查当前 DSH 的兼容能力…' }
+  const canPurge = actionCapability('purge')
+  const canMove = actionCapability('move')
 
   const archivedList = sessions ? sessions.filter((x) => x.archived) : []
   const activeList = sessions ? sessions.filter((x) => !x.archived) : []
@@ -473,7 +479,12 @@ function SessionPanel({ workspacesSvc }) {
   const verifyTrash = () => {
     setTrashBusy('__verify')
     postJSON('/archived-sessions/trash/verify', {})
-      .then((r) => { setTrashBusy(null); setTrashCheck(r); showToast(r.missing ? `发现 ${r.missing} 条日志缺失` : '回收站校验通过') })
+      .then((r) => {
+        setTrashBusy(null); setTrashCheck(r)
+        if (r.missing) showToast(`发现 ${r.missing} 条日志缺失`)
+        else if (r.unverified) showToast(`${r.unverified} 条日志位置由当前 Runtime 管理，无法直接核验`)
+        else showToast('回收站校验通过')
+      })
       .catch((e) => { setTrashBusy(null); setError(String((e && e.message) || e)) })
   }
 
@@ -554,6 +565,7 @@ function SessionPanel({ workspacesSvc }) {
   }
 
   const doMove = (it) => {
+    if (!canMove.available) { setError(canMove.reason || '当前环境不支持跨工作区移动'); return }
     const targetPath = moveMode === 'new' ? newPath.trim() : wsPath(targetWs)
     if (!targetPath) { setError('请选择已有工作区或输入新的目标目录路径'); return }
     setBusy(it.sessionId)
@@ -591,6 +603,7 @@ function SessionPanel({ workspacesSvc }) {
   }
 
   const openMoveFor = (it) => {
+    if (!canMove.available) { setError(canMove.reason || '当前环境不支持跨工作区移动'); return }
     if (openMove === it.sessionId) { setOpenMove(null); return }
     setTargetWs(workspaces.length ? (targetWs || workspaces[0].workspaceId) : '')
     setMoveMode('existing')
@@ -663,15 +676,20 @@ function SessionPanel({ workspacesSvc }) {
         >⋯</button>
         {openMenu === it.sessionId && (
           <div className="more-menu" role="menu">
-            {items.map(([id, label]) => (
+            {items.map(([id, label]) => {
+              const blocked = id === 'move' && !canMove.available
+              return (
               <button
                 key={id}
                 type="button"
                 role="menuitem"
                 className={'more-item' + (id === 'delete' ? ' more-item-danger' : '')}
+                disabled={blocked}
+                title={blocked ? canMove.reason : undefined}
                 onClick={() => runMenu(id, it)}
               >{label}</button>
-            ))}
+              )
+            })}
           </div>
         )}
       </div>
@@ -1034,9 +1052,10 @@ function SessionPanel({ workspacesSvc }) {
             </select>
           </div>
           <div className="sess-field"><label>数据检查</label><button type="button" className="archv-btn" disabled={trashBusy !== null} onClick={verifyTrash}>{trashBusy === '__verify' ? '校验中…' : '校验日志完整性'}</button></div>
-          <div className="sess-field"><label>永久清理</label><button type="button" className="archv-btn archv-del" disabled={trashBusy !== null || !trash.length} onClick={() => setPurgeTarget('__all')}>清空回收站</button></div>
+          <div className="sess-field"><label>永久清理</label><button type="button" className="archv-btn archv-del" disabled={trashBusy !== null || !trash.length || !canPurge.available} title={!canPurge.available ? canPurge.reason : undefined} onClick={() => setPurgeTarget('__all')}>清空回收站</button></div>
         </div>
-        {trashCheck && <div className={trashCheck.missing ? 'archv-err' : 'archv-empty'} role="status">校验完成：{trashCheck.healthy} 条正常，{trashCheck.missing} 条日志缺失。</div>}
+        {!canPurge.available && <div className="archv-empty" role="status">{canPurge.reason}</div>}
+        {trashCheck && <div className={trashCheck.missing ? 'archv-err' : 'archv-empty'} role="status">校验完成：{trashCheck.healthy} 条正常，{trashCheck.missing} 条日志缺失，{trashCheck.unverified || 0} 条无法直接核验。</div>}
         {trash.length === 0 ? (
           <div className="dsm-trash-empty">回收站为空。删除的会话会先进入这里，可恢复或彻底删除。</div>
         ) : (
@@ -1047,7 +1066,7 @@ function SessionPanel({ workspacesSvc }) {
                 <span className="dsm-trash-date">{fmtDate(t.deletedAt)}</span>
                 <span className="dsm-trash-actions">
                   <button type="button" className="archv-btn" disabled={trashBusy !== null} onClick={() => restoreTrash(t.sessionId)}>恢复</button>
-                  <button type="button" className="archv-btn archv-del" disabled={trashBusy !== null} onClick={() => setPurgeTarget(t.sessionId)}>彻底删除</button>
+                  <button type="button" className="archv-btn archv-del" disabled={trashBusy !== null || !canPurge.available} title={!canPurge.available ? canPurge.reason : undefined} onClick={() => setPurgeTarget(t.sessionId)}>彻底删除</button>
                 </span>
               </div>
             ))}
@@ -1169,6 +1188,14 @@ let dsmTrashIds = null
 let dsmServerPurgedIds = new Set()
 let dsmAuthoritativeTitles = new Map()
 let dsmTrashTick = 0
+let dsmCapabilities = null
+async function dsmLoadCapabilities() {
+  try { dsmCapabilities = await postJSON('/archived-sessions/capabilities', {}) } catch (e) { /* unknown stays safely unavailable */ }
+  return dsmCapabilities
+}
+function dsmActionCapability(name) {
+  return dsmCapabilities && dsmCapabilities.actions && dsmCapabilities.actions[name]
+}
 async function dsmLoadTrashIds() {
   try {
     const r = await postJSON('/archived-sessions/sidebar-state', {})
@@ -1385,6 +1412,11 @@ function installSidebarSessionMenuAug() {
     const move = mk('移动会话', ICON_MOVE, false)
     const del = mk('删除会话', ICON_DEL, true)
     const mark = mk(dsmLoadManual().has(info.id) ? '标记已读' : '标记未读', ICON_UNREAD, false)
+    const moveCapability = dsmActionCapability('move')
+    if (!moveCapability || !moveCapability.available) {
+      move.btn.disabled = true
+      move.btn.title = (moveCapability && moveCapability.reason) || '正在检查当前版本的移动能力'
+    }
     if (mark.btn.firstChild) mark.btn.firstChild.style.color = 'var(--dsw-alias-state-business-primary)'
     const chev = document.createElement('span')
     chev.style.cssText = 'margin-left:auto;flex:none;color:var(--dsw-alias-label-tertiary);font-size:14px;line-height:1'
@@ -1647,6 +1679,8 @@ function installSidebarWorkspaceDrag() {
   }, true)
 
   document.addEventListener('dragstart', (event) => {
+    const moveCapability = dsmActionCapability('move')
+    if (!moveCapability || !moveCapability.available) return
     const row = eventRow(event)
     const item = row && sessionForRow(row)
     if (!item || moving) return
@@ -1729,6 +1763,7 @@ function installSidebarWorkspaceDrag() {
 }
 
 export function apply(ctx) {
+  dsmLoadCapabilities()
   installSettingsNavIcons(ctx)
   installSidebarSessionMenuAug()
   installSidebarStatusDots()

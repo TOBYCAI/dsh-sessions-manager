@@ -14,6 +14,8 @@
 
 一个 DSH 持久化插件（host + browser 双半）。v3.0.0 起同时覆盖「设置面板」与「主页侧边栏」两个入口，无需打开设置即可完成高频会话操作。
 
+v3.5.0 新增 DSH 双代持久化适配：同时识别旧式 header 列表/`readFrom` 与新版 snapshot/`SessionHandle`，并向界面报告每项操作的实际能力。当前 Runtime 没有经过验证的安全删除或迁移路径时，相关按钮会显示禁用原因，Host 也会拒绝调用，避免出现“提示成功但日志没有删除/移动”的假成功。
+
 ## 功能
 
 ### 设置面板：会话管理
@@ -149,6 +151,7 @@ lib/client.js      预构建 client（ModuleLoader CJS handshake）
 | POST | `/archived-sessions/storage` | 存储占用聚合（按工作区排行 + 最大的会话）`{ topN }` |
 | POST | `/archived-sessions/auto-archive/settings` | 读取或更新自动归档策略 `{ inactiveDays, skipStarred }`；读取时惰性触发每日检查 |
 | POST | `/archived-sessions/auto-archive/run` | 立即执行一次自动归档检查（忽略每日节流） |
+| POST | `/archived-sessions/capabilities` | 返回当前持久化代际及读取、归档、回收站、永久删除、跨工作区移动能力 |
 
 > 删除会话默认进入回收站，只有回收站内的「彻底删除」才会物理移除日志。被彻底删除的会话由前端永久隐藏，避免 DSH 运行时缓存使其重新出现在侧栏或「未分组」中。
 
@@ -157,6 +160,9 @@ lib/client.js      预构建 client（ModuleLoader CJS handshake）
 - **适配系统**：跨平台（macOS / Windows / Linux）——只要 DSH 能在该系统运行即可；本插件 host 基于 Node（约 `^22.19` 或 `>=24`）、浏览器端为 React，不依赖特定操作系统 API。
 - DSH Desktop / web 均可（同一套 host + client）。
 - peerDependencies 见 `package.json`；`react`、`@deepseek-ai/*` 由 DSH 运行时提供。
+- `0.1.2-rc.1`：现有读取、归档、回收站、永久删除和跨工作区移动能力保持可用。
+- `0.1.3-alpha.1`：支持 snapshot 列表和 `SessionHandle` 只读流程；永久删除与跨工作区移动在缺少已验证安全路径时自动禁用，其余管理能力继续工作。能力以面板实际提示为准。
+- 未经验证的未来 Runtime 默认只开放能够识别的安全能力；插件不会用方法存在与否冒充行为兼容。
 
 ## License
 

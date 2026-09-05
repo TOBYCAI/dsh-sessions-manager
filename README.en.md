@@ -14,6 +14,8 @@
 
 A persistent DSH plugin (host + browser halves). Starting with v3.0.0, it covers both the **settings panel** and the **main sidebar**, so frequent session actions don't require opening Settings.
 
+v3.5.0 adds a two-generation DSH persistence adapter. It understands both legacy header lists/`readFrom` and the new snapshot/`SessionHandle` API, and reports action-level capabilities to the UI. When a runtime has no verified safe purge or migration path, the corresponding controls explain why they are disabled and the Host rejects direct calls, preventing false success messages.
+
 ## Features
 
 ### Settings panel: Session Manager
@@ -149,6 +151,7 @@ lib/client.js      pre-built client (ModuleLoader CJS handshake)
 | POST | `/archived-sessions/storage` | Storage-usage aggregation (per-workspace ranking + largest sessions) `{ topN }` |
 | POST | `/archived-sessions/auto-archive/settings` | Read or update the auto-archive policy `{ inactiveDays, skipStarred }`; reading lazily triggers the daily check |
 | POST | `/archived-sessions/auto-archive/run` | Run a one-off auto-archive check immediately (ignores the daily throttle) |
+| POST | `/archived-sessions/capabilities` | Report the persistence generation and per-action read/archive/trash/purge/cross-workspace-move capabilities |
 
 > Deleting a session moves it to the recycle bin by default; only "permanently delete" inside the recycle bin physically removes the log. Permanently deleted sessions are hidden forever on the client side so they don't reappear in the sidebar or "ungrouped" due to DSH runtime caching.
 
@@ -157,6 +160,9 @@ lib/client.js      pre-built client (ModuleLoader CJS handshake)
 - **Supported platforms**: cross-platform (macOS / Windows / Linux) — wherever DSH runs the plugin runs; the host half is Node (about `^22.19` or `>=24`) and the client is React, with no OS-specific APIs.
 - Works in both DSH Desktop and DSH web (same host + client halves).
 - Peer dependencies are listed in `package.json`; `react` and `@deepseek-ai/*` are provided by the DSH runtime.
+- `0.1.2-rc.1`: the existing read, archive, recycle-bin, permanent-purge, and cross-workspace move paths remain available.
+- `0.1.3-alpha.1`: snapshot lists and read-only `SessionHandle` flows are supported. Permanent purge and cross-workspace move are disabled when no verified safe path is available; other management functions continue to work. The panel shows the effective capabilities.
+- Unverified future runtimes expose only capabilities the plugin can safely identify; method presence alone is not presented as behavioral compatibility.
 
 ## License
 

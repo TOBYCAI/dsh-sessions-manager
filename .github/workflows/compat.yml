@@ -43,14 +43,33 @@ jobs:
     outputs:
       matrix: ${{ steps.tags.outputs.matrix }}
       latest: ${{ steps.tags.outputs.latest }}
+      prerelease: ${{ steps.tags.outputs.prerelease }}
     steps:
       - id: tags
         run: |
           DIST=$(npm view @deepseek-ai/dsh dist-tags --json --registry https://registry.npmjs.org)
-          VERSIONS=$(echo "$DIST" | jq -c '[.latest, .next] | unique | map(select(. != null))')
+          VERSIONS=$(echo "$DIST" | jq -c '[.latest, .next, .alpha] | unique | map(select(. != null))')
+          PRERELEASE=$(curl -fsSL https://api.github.com/repos/deepseek-ai/deepseek-harness/releases | jq -r '[.[] | select(.prerelease and (.draft | not))][0].tag_name // empty')
           echo "latest=$(echo "$DIST" | jq -r .latest)" >> "$GITHUB_OUTPUT"
           echo "matrix=$VERSIONS" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
           echo "runtime versions to smoke: $VERSIONS"
+          echo "source prerelease to inspect: $PRERELEASE"
+
+  upstream-contract:
+    name: upstream source contract ${{ needs.resolve-versions.outputs.prerelease }}
+    needs: resolve-versions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Inspect latest upstream prerelease contract
+        if: needs.resolve-versions.outputs.prerelease != ''
+        run: node scripts/check-upstream-contract.mjs "${{ needs.resolve-versions.outputs.prerelease }}"
 
   smoke:
     name: runtime smoke ${{ matrix.version }}

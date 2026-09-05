@@ -18,6 +18,8 @@ import { aggregateStorage } from './storage-stats.js'
 import { createAutoArchiveStore, pickInactiveCandidates } from './auto-archive.js'
 import { createSessionMetaCache, fingerprintOf } from './session-meta-cache.js'
 import { createTitleIndexStore } from './title-persist-index.js'
+import { createPersistenceAdapter } from './compat/persistence.js'
+import { detectCapabilities, requireCapability } from './compat/capabilities.js'
 
 
 export const name = 'dsh-sessions-manager'
@@ -122,6 +124,8 @@ function foldTitle(events) {
 export function apply(ctx) {
   const w = ctx.workspaceRegistry
   const sp = ctx.sessionPersistence
+  const persistence = createPersistenceAdapter(sp)
+  const capabilities = detectCapabilities({ persistence: sp, workspaceRegistry: w })
   const sq = ctx.sessionQuery
   const dom = () => ctx.storageDomain.get('workspace')
   const authorityTitleCache = new Map()
@@ -269,7 +273,7 @@ export function apply(ctx) {
     // 且结果同样会进缓存，下一次列表就不会再走一遍）。
     if (!meta.title || !meta.cwd) {
       try {
-        const r = await sp.readFrom(id, 0)
+        const r = await persistence.readSession(id, 0)
         if (r.meta) {
           if (!meta.cwd) meta.cwd = r.meta.cwd || null
           if (!meta.createdAt) meta.createdAt = r.meta.createdAt || null
@@ -295,17 +299,19 @@ export function apply(ctx) {
   async function collectUsage(preloadedHeaders) {
     const sizeById = new Map()
     const mtimeById = new Map()
-    let headers = null
-    if (Array.isArray(preloadedHeaders)) headers = preloadedHeaders
-    else { try { headers = await sp.list() } catch (e) { headers = [] } }
-    if (!Array.isArray(headers)) headers = []
+    let entries = null
+    if (Array.isArray(preloadedHeaders)) entries = preloadedHeaders
+    else { try { entries = await persistence.listEntries() } catch (e) { entries = [] } }
+    if (!Array.isArray(entries)) entries = []
     const CHUNK = 8
-    for (let i = 0; i < headers.length; i += CHUNK) {
-      await Promise.all(headers.slice(i, i + CHUNK).map(async (header) => {
-        const id = header && header.id != null ? String(header.id) : null
+    for (let i = 0; i < entries.length; i += CHUNK) {
+      await Promise.all(entries.slice(i, i + CHUNK).map(async (entry) => {
+        const header = entry && entry.header ? entry.header : entry
+        const id = entry && entry.id != null ? String(entry.id) : (header && header.id != null ? String(header.id) : null)
         if (!id) return
+        if (entry && Number.isFinite(entry.sizeBytes)) sizeById.set(id, Number(entry.sizeBytes))
         try {
-          const loc = sp.locate(header)
+          const loc = persistence.locate(header)
           if (!loc || typeof loc.path !== 'string' || !loc.path) return
           const st = await stat(loc.path)
           if (!st) return
@@ -393,17 +399,20 @@ export function apply(ctx) {
     let cwd = null
     let title = null
     let removedPath = null
+    let persistenceEntry = null
     try {
-      const headers = await sp.list()
-      header = headers.find((h) => String(h.id) === sid) || null
+      const entries = await persistence.listEntries()
+      const found = entries.find((entry) => entry.id === sid) || null
+      persistenceEntry = found
+      header = found ? found.header : null
       if (header) {
-        const loc = sp.locate(header)
+        const loc = persistence.locate(header)
         if (loc && typeof loc.path === 'string') removedPath = loc.path
         cwd = header.cwd || null
         title = header.title || (header.meta && header.meta.title) || null
       }
       if (!title) {
-        const r = await sp.readFrom(sid, 0)
+        const r = await persistence.readSession(sid, 0)
         if (r && r.meta) { if (!cwd) cwd = r.meta.cwd; title = foldTitle(r.events) }
       }
     } catch (e) { /* best-effort */ }
@@ -418,7 +427,7 @@ export function apply(ctx) {
       const entry = {
         sessionId: sid, title: title || cwd || sid, cwd: cwd || null,
         header: header || null, originalPath: removedPath || null,
-        sizeBytes: header && typeof header.size === 'number' ? header.size : null,
+        sizeBytes: persistenceEntry && Number.isFinite(persistenceEntry.sizeBytes) ? persistenceEntry.sizeBytes : null,
         wasArchived: archived, deletedAt: Date.now(),
       }
       const at = store.items.findIndex((t) => String(t.sessionId) === sid)
@@ -451,18 +460,24 @@ export function apply(ctx) {
   // the original workspace dir) and detach it from any workspace so DSH drops it.
   async function purgeFromTrash(sid) {
     requireSessionId(sid)
+    requireCapability(capabilities, 'purge')
     let purged = false
     await mutateTrash(async (store) => {
       const entry = store.items.find((t) => String(t.sessionId) === sid)
       if (!entry) { const error = new Error('回收站中找不到该会话'); error.status = 404; throw error }
       let target = null
       try {
-        const headers = await sp.list()
-        const current = headers.find((h) => String(h.id) === sid)
-        const located = current && sp.locate(current)
+        const entries = await persistence.listEntries()
+        const current = entries.find((entry) => entry.id === sid)
+        const located = current && persistence.locate(current.header)
         if (located && typeof located.path === 'string') target = located.path
       } catch (e) {}
       if (!target && typeof entry.originalPath === 'string') target = entry.originalPath
+      if (!target) {
+        const error = new Error('无法确认该会话的物理日志位置，已停止永久删除')
+        error.status = 409
+        throw error
+      }
       // JSONL persistence stores logs as
       //   .../<sessionId>/session.jsonl.zstd
       // Older backends may instead include the id in the filename itself.
@@ -532,6 +547,7 @@ export function apply(ctx) {
   }
 
   async function cleanupExpiredTrash() {
+    if (!capabilities.actions.purge.available) return 0
     const store = await readTrashStore()
     const days = store.settings.retentionDays
     if (!days) return 0
@@ -567,6 +583,7 @@ export function apply(ctx) {
   }
 
   async function moveOne(sid, targetPath) {
+    requireCapability(capabilities, 'move')
     // Only block the *active* conversation. ctx.sessions keeps instantiated
     // sessions alive after you switch away, so the old check (sessions.get(sid))
     // wrongly rejected every opened session — you could never move one you'd
@@ -577,7 +594,7 @@ export function apply(ctx) {
     if (activeId != null && String(activeId) === String(sid)) {
       throw new Error('该会话当前处于打开状态，请先切换到别的会话再移动。')
     }
-    const r = await sp.readFrom(sid, 0)
+    const r = await persistence.readSession(sid, 0)
     if (!r || !r.meta) throw new Error('无法读取该会话的日志')
     const meta = r.meta
     const events = r.events
@@ -661,7 +678,7 @@ export function apply(ctx) {
       // disk, and WorkspaceEntity.sessionIds filters by that exact cwd. A bare
       // rename would leave frame0 pointing at the old workspace, so reindex /
       // restart would keep attributing the session to the wrong workspace.
-      await relocateLog(meta, newHeader)
+      if (!await relocateLog(meta, newHeader)) throw new Error('移动失败：无法确认会话日志已迁移到目标工作区')
       // Redirect the persistence state's cwd so future appends land in newPath.
       try {
         const st = sp.states && sp.states.get && sp.states.get(sid)
@@ -683,7 +700,7 @@ export function apply(ctx) {
 
       if (typeof sp.create !== 'function' || typeof sp.append !== 'function') {
         // No create primitive: must relocate the existing log directly.
-        await relocateLog(meta, newHeader)
+        if (!await relocateLog(meta, newHeader)) throw new Error('移动失败：无法确认会话日志已迁移到目标工作区')
       } else {
         const backupPath = oldPath ? `${oldPath}.move-backup-${Date.now()}` : null
         if (backupPath) { try { await rename(oldPath, backupPath) } catch (e) { if (e && e.code !== 'ENOENT') throw new Error('移动失败：无法备份旧的会话日志') } }
@@ -691,7 +708,7 @@ export function apply(ctx) {
         try {
           await sp.create(newHeader)
           await sp.append(sid, events)
-          const check = await sp.readFrom(sid, 0)
+          const check = await persistence.readSession(sid, 0)
           if (!check || !check.meta || check.meta.cwd !== canonical) {
             throw new Error('移动后校验失败：会话工作目录未正确更新')
           }
@@ -701,7 +718,7 @@ export function apply(ctx) {
             // Collision: the session is already materialized in states (archived
             // or previously opened). Fall back to physically relocating the log.
             await restore()
-            await relocateLog(meta, newHeader)
+            if (!await relocateLog(meta, newHeader)) throw new Error('移动失败：无法确认会话日志已迁移到目标工作区')
           } else {
             await restore()
             throw new Error('移动会话日志失败：' + String((e && e.message) || e))
@@ -763,10 +780,10 @@ export function apply(ctx) {
   async function reindexRegistry() {
     const reg = w
     if (!reg || typeof reg.replaceHeaderIndex !== 'function') return false
-    let headers = null
-    try { headers = await sp.list() } catch (e) { headers = null }
-    if (!headers || !Array.isArray(headers)) return false
-    await reg.replaceHeaderIndex(headers)
+    let entries = null
+    try { entries = await persistence.listEntries() } catch (e) { entries = null }
+    if (!entries || !Array.isArray(entries)) return false
+    await reg.replaceHeaderIndex(entries.map((entry) => entry.header))
     if (typeof reg.rebuildEntities === 'function') reg.rebuildEntities()
     return true
   }
@@ -820,15 +837,15 @@ export function apply(ctx) {
   //      是元数据缓存能否跳过整本解码的前提，收益远大于成本
   //   3. 未命中缓存的会话走**一次**批量投影（sq.readTitleSnapshots），而不是逐条
   async function allSessionItems(opts = {}) {
-    let headers = []
+    let entries = []
     let headersOk = false
     try {
-      headers = await sp.list()
-      headersOk = Array.isArray(headers)
-      if (!headersOk) headers = []
-    } catch (e) { headers = [] }
+      entries = await persistence.listEntries()
+      headersOk = Array.isArray(entries)
+      if (!headersOk) entries = []
+    } catch (e) { entries = [] }
     let live = ctx.get('sessions')
-    const ids = headers.map((h) => String(h.id))
+    const ids = entries.map((entry) => entry.id)
     if (live) { try { live.list().forEach((s) => { const sid = String(s.id); if (!ids.includes(sid)) ids.push(sid) }) } catch (e) { /* ignore */ } }
     // Exclude sessions already moved to the recycle bin (软删除): they live in
     // 回收站, not in 会话管理, so the panel won't re-list them after a delete.
@@ -842,7 +859,7 @@ export function apply(ctx) {
     try { for (const ent of w.list()) wsByPath[ent.path] = ent } catch (e) { wsByPath = {} }
     const currentArchived = new Set((await archivedState().catch(() => ({ archivedSessionIds: [] }))).archivedSessionIds || [])
     const items = []
-    const usage = await collectUsage(headers)
+    const usage = await collectUsage(entries)
     // 先按指纹把「缓存命中」与「需要解码」分开，只对后者做批量投影。
     const statsById = new Map(visibleIds.map((id) => [id, { mtimeMs: usage.mtimeById.get(id), size: usage.sizeById.get(id) }]))
     const { cached, missing } = metaCache.partition(visibleIds, statsById)
@@ -927,15 +944,15 @@ export function apply(ctx) {
   // 既不会陈旧也不会回到「每次全量解码」。
   async function sidebarAuthority() {
     const ids = []
-    let headers = []
-    try { headers = await sp.list() } catch (e) { headers = [] }
-    if (!Array.isArray(headers)) headers = []
-    for (const header of headers) ids.push(String(header.id))
+    let entries = []
+    try { entries = await persistence.listEntries() } catch (e) { entries = [] }
+    if (!Array.isArray(entries)) entries = []
+    for (const entry of entries) ids.push(entry.id)
     const sessions = ctx.get('sessions')
     try { if (sessions) sessions.list().forEach((session) => { const sid = String(session.id); if (!ids.includes(sid)) ids.push(sid) }) } catch (e) {}
     const store = await readTrashStore()
     if (ids.length) {
-      const usage = await collectUsage(headers)
+      const usage = await collectUsage(entries)
       const statsById = new Map(ids.map((id) => [id, { mtimeMs: usage.mtimeById.get(id), size: usage.sizeById.get(id) }]))
       const { cached, missing } = metaCache.partition(ids, statsById)
       // P4：与列表构建共用持久标题索引，冷启动零解码。
@@ -980,7 +997,7 @@ export function apply(ctx) {
       meta = (live && live.header) || null
       try { events = Array.isArray(live.events) ? [...live.events] : [] } catch (e) { events = [] }
     } else {
-      const r = await sp.readFrom(sid, 0)
+      const r = await persistence.readSession(sid, 0)
       if (!r || !r.meta) throw new Error('找不到该会话的记录（会话不存在）')
       meta = r.meta
       events = Array.isArray(r.events) ? r.events : []
@@ -989,7 +1006,7 @@ export function apply(ctx) {
     try {
       // rc.8 的 sessionPersistence 后端没有 artifactInfo；用 locate(meta) 拿日志
       // 文件真实路径后 stat 出字节数（磁盘占用）。
-      const loc = sp.locate(meta)
+      const loc = persistence.locate(meta)
       if (loc && typeof loc.path === 'string' && loc.path) {
         const st = await stat(loc.path)
         if (st && typeof st.size === 'number') sizeBytes = st.size
@@ -1062,7 +1079,8 @@ export function apply(ctx) {
     const subagentSet = new Set()
     try {
       if (typeof sp.list === 'function') {
-        for (const h of await sp.list()) {
+        for (const entry of await persistence.listEntries()) {
+          const h = entry.header
           if (String(h.parentSession) !== String(sid)) continue
           if (h.origin === 'subagent') subagentSet.add(h.id); else childrenSet.add(h.id)
         }
@@ -1100,6 +1118,12 @@ export function apply(ctx) {
 
     disposers.push(ctx.webServer.register({
       kind: 'exact',
+      path: '/archived-sessions/capabilities',
+      handler: async (req, res) => json(res, capabilities),
+    }))
+
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
       path: '/archived-sessions/list',
       handler: async (req, res) => {
         try {
@@ -1110,8 +1134,8 @@ export function apply(ctx) {
           let materialized = new Set()
           let live = ctx.get('sessions')
           try {
-            const headers = await sp.list()
-            materialized = new Set(headers.map((h) => String(h.id)))
+            const entries = await persistence.listEntries()
+            materialized = new Set(entries.map((entry) => entry.id))
           } catch (e) { /* best-effort */ }
           const trashStore = await readTrashStore()
           const hidden = new Set([...trashStore.items.map((item) => String(item.sessionId)), ...trashStore.purgedSessionIds.map(String)])
@@ -1157,11 +1181,11 @@ export function apply(ctx) {
           const results = []
           for (const sid of ids) {
             try { results.push({ sessionId: sid, ok: true, ...(await restoreOne(sid)) }) }
-            catch (e) { results.push({ sessionId: sid, ok: false, error: String((e && e.message) || e) }) }
+            catch (e) { results.push({ sessionId: sid, ok: false, code: e && e.code, error: String((e && e.message) || e) }) }
           }
           json(res, { ok: true, restored: results.filter((r) => r.ok).length, results })
         } catch (e) {
-          json(res, { ok: false, error: String((e && e.message) || e) }, 500)
+          json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
         }
       },
     }))
@@ -1200,7 +1224,7 @@ export function apply(ctx) {
           }
           json(res, { ok: true, deleted: results.filter((r) => r.ok).length, results })
         } catch (e) {
-          json(res, { ok: false, error: String((e && e.message) || e) }, 500)
+          json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
         }
       },
     }))
@@ -1245,11 +1269,19 @@ export function apply(ctx) {
         try {
           const items = await readTrash()
           const results = await Promise.all(items.map(async (item) => {
-            let exists = false
-            if (typeof item.originalPath === 'string') exists = await stat(item.originalPath).then(() => true).catch(() => false)
-            return { sessionId: item.sessionId, status: exists ? 'ok' : 'missing', originalPath: item.originalPath || null }
+            if (typeof item.originalPath !== 'string' || !item.originalPath) {
+              return { sessionId: item.sessionId, status: 'unverified', originalPath: null }
+            }
+            const exists = await stat(item.originalPath).then(() => true).catch(() => false)
+            return { sessionId: item.sessionId, status: exists ? 'ok' : 'missing', originalPath: item.originalPath }
           }))
-          json(res, { ok: true, healthy: results.filter((r) => r.status === 'ok').length, missing: results.filter((r) => r.status === 'missing').length, results })
+          json(res, {
+            ok: true,
+            healthy: results.filter((r) => r.status === 'ok').length,
+            missing: results.filter((r) => r.status === 'missing').length,
+            unverified: results.filter((r) => r.status === 'unverified').length,
+            results,
+          })
         } catch (e) {
           json(res, { ok: false, error: String((e && e.message) || e) }, errorStatus(e))
         }
@@ -1268,7 +1300,7 @@ export function apply(ctx) {
           metaCache.invalidate(sid)
           json(res, out)
         } catch (e) {
-          json(res, { ok: false, error: String((e && e.message) || e) }, 500)
+          json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
         }
       },
     }))
@@ -1287,7 +1319,7 @@ export function apply(ctx) {
           titleIndex.remove([sid]).catch(() => {})
           json(res, out)
         } catch (e) {
-          json(res, { ok: false, error: String((e && e.message) || e) }, 500)
+          json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
         }
       },
     }))
@@ -1307,7 +1339,7 @@ export function apply(ctx) {
           }
           json(res, { ok: true, purged: results.filter((r) => r.ok).length, results })
         } catch (e) {
-          json(res, { ok: false, error: String((e && e.message) || e) }, 500)
+          json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
         }
       },
     }))
@@ -1357,7 +1389,7 @@ export function apply(ctx) {
           const url = new URL(req.url, 'http://localhost')
           const sid = url.searchParams.get('sessionId')
           requireSessionId(sid)
-          const r = await sp.readFrom(sid, 0)
+          const r = await persistence.readSession(sid, 0)
           if (!r || !r.meta) {
             const error = new Error('无法读取该会话的日志')
             error.status = 404
@@ -1424,7 +1456,7 @@ export function apply(ctx) {
           try { await reindexRegistry() } catch (e) { /* best-effort */ }
           json(res, { sessionId: sid, ...moved })
         } catch (e) {
-          json(res, { ok: false, error: String((e && e.message) || e) }, 500)
+          json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
         }
       },
     }))
