@@ -12,9 +12,7 @@
 
 > DSH session manager: archive, move, restore, and inspect sessions from **Settings → 会话管理**; mark unread, move, and delete sessions directly from the **main sidebar**. Deleted sessions go to the recycle bin first and can be restored or permanently purged.
 
-A persistent DSH plugin (host + browser halves). Starting with v3.0.0, it covers both the **settings panel** and the **main sidebar**, so frequent session actions don't require opening Settings.
-
-v3.5.0 adds a two-generation DSH persistence adapter. It understands both legacy header lists/`readFrom` and the new snapshot/`SessionHandle` API, and reports action-level capabilities to the UI. When a runtime has no verified safe purge or migration path, the corresponding controls explain why they are disabled and the Host rejects direct calls, preventing false success messages.
+A persistent DSH plugin (host + browser halves) covering both the **settings panel** and the **main sidebar**, so frequent session actions don't require opening Settings. It understands both legacy header lists/`readFrom` and the new snapshot/`SessionHandle` API, enabling actions according to the current Runtime's verified capabilities. Unverified purge or migration paths are disabled in both UI and Host to prevent false success.
 
 ## Features
 
