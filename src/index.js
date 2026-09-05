@@ -16,6 +16,7 @@ import { renderSessionMarkdown } from './markdown.js'
 import { createStarIndex } from './star-index.js'
 import { aggregateStorage } from './storage-stats.js'
 import { createAutoArchiveStore, pickInactiveCandidates } from './auto-archive.js'
+import { createSessionMetaCache } from './session-meta-cache.js'
 
 
 export const name = 'dsh-sessions-manager'
@@ -123,7 +124,29 @@ export function apply(ctx) {
   const sq = ctx.sessionQuery
   const dom = () => ctx.storageDomain.get('workspace')
   const authorityTitleCache = new Map()
-  let authorityTitlesLoaded = false
+  // 会话原始元数据缓存（title / cwd / createdAt），按日志文件 (mtime, size) 指纹校验。
+  // 见 src/session-meta-cache.js 的说明：列表构建原本每条会话都要整本解压日志，
+  // 这个缓存让「日志没变」的会话直接跳过解码。
+  const metaCache = createSessionMetaCache()
+
+  // 从投影快照里抽出元数据；快照缺失/异常时返回零值 meta（调用方决定兜底）。
+  function metaFromSnapshot(o) {
+    let title = null, createdAt = null, cwd = null
+    if (o) {
+      if (o.title && o.title.title) title = String(o.title.title)
+      if (o.session) { cwd = o.session.cwd || null; createdAt = o.session.createdAt || null }
+    }
+    return { title, cwd, createdAt }
+  }
+
+  // 投影快照的两种返回形态都兼容：新版 runtime 返回 settled 结果
+  // （{ status: 'fulfilled', value }），老版本直接返回快照本身。
+  function unwrapSnapshot(result) {
+    if (!result) return null
+    if (result.status === 'fulfilled') return result.value || null
+    if (result.status === 'rejected') return null
+    return result
+  }
 
   async function archivedState() {
     const d = dom()
@@ -157,44 +180,66 @@ export function apply(ctx) {
 
   let wsByPath = {}
 
-  async function resolveOne(id, usage) {
-    let title = null, createdAt = null, cwd = null
-    try {
-      const o = await sq.readTitleSnapshot(id)
-      if (o) {
-        if (o.title && o.title.title) title = String(o.title.title)
-        if (o.session) { cwd = o.session.cwd || null; createdAt = o.session.createdAt || null }
-      }
-    } catch (e) { /* fall back to raw log */ }
-    if (!title || !cwd) {
+  // 把原始元数据渲染成列表项。缓存命中与解码两条路径共用，保证输出一致。
+  function buildItem(key, meta, usage, exposeUsage) {
+    const cwd = meta.cwd || null
+    const ws = cwd ? wsByPath[cwd] : undefined
+    const title = meta.title || null
+    const display = title ? (String(title).length > MAX_TITLE ? String(title).slice(0, MAX_TITLE) + '…' : String(title)) : null
+    const base = {
+      sessionId: key,
+      title: display,
+      createdAt: meta.createdAt || null,
+      workspacePath: cwd,
+      workspaceTitle: (ws && ws.title) ? ws.title : null,
+      workspaceGone: !!(cwd && !ws),
+      hasWorkspace: !!cwd,
+    }
+    // sizeBytes / updatedAt 只在需要的路由（存储分析 / 自动归档）里带上：
+    // 它们本就来自 usage，附带输出对列表渲染无益。
+    if (exposeUsage && usage) {
+      if (usage.sizeById && usage.sizeById.has(key)) base.sizeBytes = usage.sizeById.get(key)
+      if (usage.mtimeById && usage.mtimeById.has(key)) base.updatedAt = usage.mtimeById.get(key)
+    }
+    return base
+  }
+
+  // Resolve one session's display metadata.
+  //
+  // 成本模型（issue #1）：下面的解码路径会把整本 .jsonl.zstd 逐帧解压、逐行
+  // JSON.parse，只为折叠出标题——大库上一次全表要几秒阻塞式 CPU。日志的
+  // (mtime, size) 没变就意味着内容没变，折叠结果也不可能变，所以命中缓存时
+  // 直接复用上次的元数据，跳过整本解码。
+  //
+  // opts.preloaded：批量投影（sq.readTitleSnapshots）已经拿到的快照；传了就不再
+  // 对同一条日志做第二次单例投影——issue 里「一条日志在单次列表里被解码两次」
+  // 正是这么来的。
+  async function resolveOne(id, usage, opts = {}) {
+    const key = String(id)
+    const statInfo = usage ? { mtimeMs: usage.mtimeById.get(key), size: usage.sizeById.get(key) } : null
+    const cached = metaCache.get(key, statInfo)
+    if (cached) return buildItem(key, cached, usage, opts.exposeUsage)
+
+    let meta = { title: null, cwd: null, createdAt: null }
+    if (opts.preloaded !== undefined) {
+      meta = metaFromSnapshot(unwrapSnapshot(opts.preloaded))
+    } else if (typeof sq.readTitleSnapshot === 'function') {
+      try { meta = metaFromSnapshot(await sq.readTitleSnapshot(id)) } catch (e) { /* fall back to raw log */ }
+    }
+    // 兜底：投影没给出标题或 cwd 时，才回退到整本解码（这条路径本身就贵，
+    // 且结果同样会进缓存，下一次列表就不会再走一遍）。
+    if (!meta.title || !meta.cwd) {
       try {
         const r = await sp.readFrom(id, 0)
         if (r.meta) {
-          if (!cwd) cwd = r.meta.cwd || null
-          if (!createdAt) createdAt = r.meta.createdAt || null
+          if (!meta.cwd) meta.cwd = r.meta.cwd || null
+          if (!meta.createdAt) meta.createdAt = r.meta.createdAt || null
         }
-        if (!title && Array.isArray(r.events)) title = foldTitle(r.events)
+        if (!meta.title && Array.isArray(r.events)) meta.title = foldTitle(r.events)
       } catch (e2) { /* keep what we have */ }
     }
-    const ws = cwd ? wsByPath[cwd] : undefined
-    const workspaceGone = !!(cwd && !ws)
-    const display = title ? (String(title).length > MAX_TITLE ? String(title).slice(0, MAX_TITLE) + '…' : String(title)) : null
-    const base = {
-      sessionId: id,
-      title: display,
-      createdAt: createdAt || null,
-      workspacePath: cwd || null,
-      workspaceTitle: (ws && ws.title) ? ws.title : null,
-      workspaceGone: workspaceGone ? true : false,
-      hasWorkspace: !!cwd,
-    }
-    // sizeBytes / updatedAt are opt-in: they cost one stat() per session, so
-    // the high-frequency list routes stay exactly as cheap as before.
-    if (usage) {
-      if (usage.sizeById && usage.sizeById.has(id)) base.sizeBytes = usage.sizeById.get(id)
-      if (usage.mtimeById && usage.mtimeById.has(id)) base.updatedAt = usage.mtimeById.get(id)
-    }
-    return base
+    metaCache.set(key, statInfo, meta)
+    return buildItem(key, meta, usage, opts.exposeUsage)
   }
 
   // Disk usage + last-write time for every session, in one pass.
@@ -205,11 +250,13 @@ export function apply(ctx) {
   // file's last write tracks the conversation's last turn. It errs safe: a log
   // we relocated (move) gets a fresh mtime and therefore looks *more* active
   // than it is, which can only delay an auto-archive, never cause a wrong one.
-  async function collectUsage() {
+  // headers 可由调用方传入复用（列表构建里已经 sp.list() 过一次，避免重复列目录）。
+  async function collectUsage(preloadedHeaders) {
     const sizeById = new Map()
     const mtimeById = new Map()
-    let headers = []
-    try { headers = await sp.list() } catch (e) { headers = [] }
+    let headers = null
+    if (Array.isArray(preloadedHeaders)) headers = preloadedHeaders
+    else { try { headers = await sp.list() } catch (e) { headers = [] } }
     if (!Array.isArray(headers)) headers = []
     const CHUNK = 8
     for (let i = 0; i < headers.length; i += CHUNK) {
@@ -705,20 +752,43 @@ export function apply(ctx) {
     })
   }
 
-  // opts.usage: fill sizeBytes + updatedAt (one stat() per session). Off by
-  // default so the panel's list route keeps its original cost.
+  // 批量投影：一次调用把多条会话的标题/header 拿出来，避免逐条触发整本解码。
+  // 老 runtime 没有 readTitleSnapshots 时返回空 Map，调用方自然回退到逐条投影
+  // （功能不受影响，只是少了这层优化——插件不能假设对方的 runtime 版本）。
+  async function projectTitles(ids) {
+    const out = new Map()
+    if (!ids || !ids.length) return out
+    if (typeof sq.readTitleSnapshots !== 'function') return out
+    try {
+      const results = await sq.readTitleSnapshots(ids)
+      if (!Array.isArray(results)) return out
+      results.forEach((result, index) => {
+        const id = String(ids[index])
+        out.set(id, unwrapSnapshot(result))
+      })
+    } catch (e) { /* 批量失败：逐条回退 */ }
+    return out
+  }
+
+  // opts.usage: expose sizeBytes + updatedAt on each item (storage analysis and
+  // the auto-archive sweep need them; the panel list does not).
+  //
+  // 性能要点（issue #1）：
+  //   1. sp.list() 只调一次（原先列了两遍目录）
+  //   2. 无条件做一遍 stat——一次 stat 是微秒级，而它算出的 (mtime, size) 指纹
+  //      是元数据缓存能否跳过整本解码的前提，收益远大于成本
+  //   3. 未命中缓存的会话走**一次**批量投影（sq.readTitleSnapshots），而不是逐条
   async function allSessionItems(opts = {}) {
-    let materialized = new Set()
-    let live = ctx.get('sessions')
+    let headers = []
     let headersOk = false
     try {
-      const headers = await sp.list()
-      materialized = new Set(headers.map((h) => String(h.id)))
-      headersOk = true
-    } catch (e) { /* best-effort */ }
-    const ids = []
-    try { for (const header of await sp.list()) ids.push(String(header.id)) } catch (e) { /* ignore */ }
-    if (live) { try { live.list().forEach((s) => { if (!ids.includes(String(s.id))) ids.push(String(s.id)) }) } catch (e) { /* ignore */ } }
+      headers = await sp.list()
+      headersOk = Array.isArray(headers)
+      if (!headersOk) headers = []
+    } catch (e) { headers = [] }
+    let live = ctx.get('sessions')
+    const ids = headers.map((h) => String(h.id))
+    if (live) { try { live.list().forEach((s) => { const sid = String(s.id); if (!ids.includes(sid)) ids.push(sid) }) } catch (e) { /* ignore */ } }
     // Exclude sessions already moved to the recycle bin (软删除): they live in
     // 回收站, not in 会话管理, so the panel won't re-list them after a delete.
     let hiddenIds = new Set()
@@ -731,12 +801,19 @@ export function apply(ctx) {
     try { for (const ent of w.list()) wsByPath[ent.path] = ent } catch (e) { wsByPath = {} }
     const currentArchived = new Set((await archivedState().catch(() => ({ archivedSessionIds: [] }))).archivedSessionIds || [])
     const items = []
-    const usage = (opts && opts.usage) ? await collectUsage() : null
+    const usage = await collectUsage(headers)
+    // 先按指纹把「缓存命中」与「需要解码」分开，只对后者做批量投影。
+    const statsById = new Map(visibleIds.map((id) => [id, { mtimeMs: usage.mtimeById.get(id), size: usage.sizeById.get(id) }]))
+    const { cached, missing } = metaCache.partition(visibleIds, statsById)
+    const snapshotById = await projectTitles(missing)
     const CHUNK = 6
     for (let i = 0; i < visibleIds.length; i += CHUNK) {
       // Arrow wrapper on purpose: Array#map passes (value, index, array), and
-      // resolveOne's second argument is the usage map.
-      const res2 = await Promise.all(visibleIds.slice(i, i + CHUNK).map((id) => resolveOne(id, usage)))
+      // resolveOne's second and third arguments are fixed here.
+      const res2 = await Promise.all(visibleIds.slice(i, i + CHUNK).map((id) => resolveOne(id, usage, {
+        exposeUsage: !!(opts && opts.usage),
+        preloaded: snapshotById.has(id) ? snapshotById.get(id) : undefined,
+      })))
       for (const it of res2) items.push({ ...it, archived: currentArchived.has(it.sessionId) })
     }
     // Annotate stars; GC only when we have a trustworthy id baseline, so a
@@ -794,28 +871,37 @@ export function apply(ctx) {
     return { ok: true, archived, candidates: candidates.length, failed, lastRunAt: now }
   }
 
+  // 侧栏权威数据：标题 + 回收站 id 集合。
+  //
+  // 标题原先「首次调用算一次就永久缓存」，日志之后再变也不会更新——标题会陈旧。
+  // 现在复用 metaCache：每次调用只 stat 一遍，日志没变直接取缓存，变了才重解码，
+  // 既不会陈旧也不会回到「每次全量解码」。
   async function sidebarAuthority() {
     const ids = []
-    try { for (const header of await sp.list()) ids.push(String(header.id)) } catch (e) {}
+    let headers = []
+    try { headers = await sp.list() } catch (e) { headers = [] }
+    if (!Array.isArray(headers)) headers = []
+    for (const header of headers) ids.push(String(header.id))
     const sessions = ctx.get('sessions')
-    try { if (sessions) sessions.list().forEach((session) => { if (!ids.includes(String(session.id))) ids.push(String(session.id)) }) } catch (e) {}
+    try { if (sessions) sessions.list().forEach((session) => { const sid = String(session.id); if (!ids.includes(sid)) ids.push(sid) }) } catch (e) {}
     const store = await readTrashStore()
-    if (!authorityTitlesLoaded && ids.length && typeof sq.readTitleSnapshots === 'function') {
-      const results = await sq.readTitleSnapshots(ids)
-      results.forEach((result, index) => {
-        if (result && result.status === 'fulfilled' && result.value && result.value.title && typeof result.value.title.title === 'string') {
-          authorityTitleCache.set(ids[index], result.value.title.title)
+    if (ids.length) {
+      const usage = await collectUsage(headers)
+      const statsById = new Map(ids.map((id) => [id, { mtimeMs: usage.mtimeById.get(id), size: usage.sizeById.get(id) }]))
+      const { cached, missing } = metaCache.partition(ids, statsById)
+      const snapshotById = await projectTitles(missing)
+      for (const id of ids) {
+        let meta = cached.get(id) || null
+        if (!meta) {
+          const snapshot = snapshotById.has(id)
+            ? snapshotById.get(id)
+            : (typeof sq.readTitleSnapshot === 'function' ? await sq.readTitleSnapshot(id).catch(() => null) : null)
+          const next = metaFromSnapshot(snapshot)
+          metaCache.set(id, statsById.get(id), next)
+          meta = next
         }
-      })
-      authorityTitlesLoaded = true
-    } else if (!authorityTitlesLoaded) {
-      for (const sid of ids) {
-        try {
-          const snapshot = await sq.readTitleSnapshot(sid)
-          if (snapshot && snapshot.title && typeof snapshot.title.title === 'string') authorityTitleCache.set(sid, snapshot.title.title)
-        } catch (e) {}
+        if (meta && meta.title) authorityTitleCache.set(id, String(meta.title))
       }
-      authorityTitlesLoaded = true
     }
     return {
       titles: Object.fromEntries(authorityTitleCache),
@@ -1031,7 +1117,11 @@ export function apply(ctx) {
           const body = await readJsonBody(req)
           const sid = body && typeof body.sessionId === 'string' ? body.sessionId : null
           if (!sid) return json(res, { ok: false, error: 'missing sessionId' }, 400)
-          json(res, await deleteOne(sid))
+          const out = await deleteOne(sid)
+          // 日志被搬进回收站（文件已不在原处）：丢弃缓存条目，避免下次 stat 失败
+          // 时残留旧元数据。
+          metaCache.invalidate(sid)
+          json(res, out)
         } catch (e) {
           json(res, { ok: false, error: String((e && e.message) || e) }, errorStatus(e))
         }
@@ -1048,7 +1138,7 @@ export function apply(ctx) {
           if (!ids || ids.length === 0) return json(res, { ok: false, error: 'missing sessionIds' }, 400)
           const results = []
           for (const sid of ids) {
-            try { results.push({ sessionId: sid, ok: true, ...(await deleteOne(sid)) }) }
+            try { results.push({ sessionId: sid, ok: true, ...(await deleteOne(sid)) }); metaCache.invalidate(sid) }
             catch (e) { results.push({ sessionId: sid, ok: false, error: String((e && e.message) || e) }) }
           }
           json(res, { ok: true, deleted: results.filter((r) => r.ok).length, results })
@@ -1117,7 +1207,9 @@ export function apply(ctx) {
           const body = await readJsonBody(req)
           const sid = body && typeof body.sessionId === 'string' ? body.sessionId : null
           if (!sid) return json(res, { ok: false, error: 'missing sessionId' }, 400)
-          json(res, await restoreFromTrash(sid))
+          const out = await restoreFromTrash(sid)
+          metaCache.invalidate(sid)
+          json(res, out)
         } catch (e) {
           json(res, { ok: false, error: String((e && e.message) || e) }, 500)
         }
@@ -1132,7 +1224,9 @@ export function apply(ctx) {
           const body = await readJsonBody(req)
           const sid = body && typeof body.sessionId === 'string' ? body.sessionId : null
           if (!sid) return json(res, { ok: false, error: 'missing sessionId' }, 400)
-          json(res, await purgeFromTrash(sid))
+          const out = await purgeFromTrash(sid)
+          metaCache.invalidate(sid)
+          json(res, out)
         } catch (e) {
           json(res, { ok: false, error: String((e && e.message) || e) }, 500)
         }
@@ -1149,7 +1243,7 @@ export function apply(ctx) {
           if (!ids || ids.length === 0) return json(res, { ok: false, error: 'missing sessionIds' }, 400)
           const results = []
           for (const sid of ids) {
-            try { results.push({ sessionId: sid, ok: true, ...(await purgeFromTrash(sid)) }) }
+            try { results.push({ sessionId: sid, ok: true, ...(await purgeFromTrash(sid)) }); metaCache.invalidate(sid) }
             catch (e) { results.push({ sessionId: sid, ok: false, error: String((e && e.message) || e) }) }
           }
           json(res, { ok: true, purged: results.filter((r) => r.ok).length, results })
@@ -1260,6 +1354,9 @@ export function apply(ctx) {
           if (!sid) return json(res, { ok: false, error: 'missing sessionId' }, 400)
           if (!target) return json(res, { ok: false, error: 'missing targetPath' }, 400)
           const moved = await moveOne(sid, target)
+          // 移动会改写日志 frame0 的 cwd：元数据（cwd）已变，主动丢弃缓存条目，
+          // 不等 mtime 指纹自然失效（Windows 上 mtime 精度较粗，指纹可能不变）。
+          metaCache.invalidate(sid)
           // Reindex the host's in-memory sessionPath index so the sidebar
           // reflects the new grouping immediately (no DSH restart needed).
           // Do this before replying: drag/drop and menu clients treat a 2xx

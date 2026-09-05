@@ -432,7 +432,9 @@ function SessionPanel({ workspacesSvc }) {
         setBusy(null)
         const n = it.title || it.sessionId
         showToast(action === 'archive' ? `已归档「${n}」` : `已恢复「${n}」`)
-        refresh()
+        // 单条归档/恢复只是成员标记翻转：本地更新即可，不走整表 refresh
+        //（refresh 会清空多选状态；host 侧缓存已把列表成本压到 stat 级别）。
+        setSessions((s) => s && s.map((x) => (x.sessionId === it.sessionId ? { ...x, archived: action === 'archive' } : x)))
       })
       .catch((e) => { setBusy(null); setError(String((e && e.message) || e)) })
   }
@@ -445,8 +447,12 @@ function SessionPanel({ workspacesSvc }) {
         setBusy(null)
         const n = delTarget.title || delTarget.sessionId
         showToast(`已删除 ${n}（已移入回收站）`)
+        const sid = String(delTarget.sessionId)
         setDelTarget(null)
-        refresh()
+        // 删除进入回收站：本地移除该行 + 单刷回收站，不整表 refresh。
+        setSessions((s) => s && s.filter((x) => String(x.sessionId) !== sid))
+        loadTrash()
+        dsmLoadTrashIds()
       })
       .catch((e) => { setBusy(null); setDelTarget(null); setError(String((e && e.message) || e)) })
   }
@@ -559,7 +565,10 @@ function SessionPanel({ workspacesSvc }) {
         setMoveMode('existing')
         setNewPath('')
         showToast(`已把「${it.title || it.sessionId}」移到 ${r.workspaceTitle || targetPath}`)
-        refresh()
+        // 移动只改 workspacePath/workspaceTitle：本地替换该行，不整表 refresh。
+        setSessions((s) => s && s.map((x) => (x.sessionId === it.sessionId
+          ? { ...x, workspacePath: r.workspacePath || targetPath, workspaceTitle: r.workspaceTitle || targetPath }
+          : x)))
       })
       .catch((e) => { setBusy(null); setError(String((e && e.message) || e)) })
   }
@@ -1627,6 +1636,16 @@ function installSidebarWorkspaceDrag() {
   // native drag gesture for reordering sessions inside one group; only a real
   // workspace-heading target is intercepted here, so same-group sorting keeps
   // its official behavior.
+  // 指针按下先于 dragstart 数十到数百毫秒，正好用来给「Map 里还没有的行」预热：
+  // replace the 5s poll with a just-in-time fetch, so a brand-new session is
+  // draggable on the first gesture without a background poll.
+  document.addEventListener('pointerdown', (event) => {
+    if (moving) return
+    const row = eventRow(event)
+    if (!row || sessionForRow(row)) return
+    maybeRefresh()
+  }, true)
+
   document.addEventListener('dragstart', (event) => {
     const row = eventRow(event)
     const item = row && sessionForRow(row)
@@ -1682,7 +1701,31 @@ function installSidebarWorkspaceDrag() {
   refresh()
   const observer = new MutationObserver(scheduleDecorate)
   observer.observe(document.body, { childList: true, subtree: true })
-  setInterval(refresh, 5000)
+  // 原先这里每 5s 无脑全表刷新一次。该接口在 host 侧要遍历全部会话，
+  // 大库（issue #1: 49 会话 / 14 万帧）上每次都是一次重活，页面挂着就一直占宿主 CPU，
+  // 连累 session.history 之类 RPC 超时。拖拽元数据根本不需要 5s 精度：
+  //   - 背景标签页完全不刷新
+  //   - 前台每 60s 兜底一次
+  //   - 标签页重新可见、或真正开始拖拽而 Map 里没有该行时，按需刷新
+  let lastRefreshAt = Date.now()
+  const maybeRefresh = () => {
+    if (typeof document !== 'undefined' && document.hidden) return
+    lastRefreshAt = Date.now()
+    return refresh()
+  }
+  const REFRESH_MS = 60000
+  setInterval(() => {
+    if (typeof document !== 'undefined' && document.hidden) return
+    if (Date.now() - lastRefreshAt < REFRESH_MS) return
+    maybeRefresh()
+  }, REFRESH_MS)
+  if (typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) return
+      if (Date.now() - lastRefreshAt < 30000) return
+      maybeRefresh()
+    })
+  }
 }
 
 export function apply(ctx) {
