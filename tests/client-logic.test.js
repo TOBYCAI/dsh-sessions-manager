@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { canDropOnWorkspace, dotStateFor, sessionForNodes, workspaceForNodes } from '../src/client/logic.js'
+import { authoritativeTitleForFirstPaint, canDropOnWorkspace, dotStateFor, sessionForNodes, workspaceForNodes } from '../src/client/logic.js'
 
 // ---- dotStateFor：状态点语义 ----------------------------------------------
 // 历史回归：DSH 把 running 报成 ongoing（9766476）；done 在当前行上不能亮绿
 // （否则点开闪绿）。这两个 case 锁死。
 test('dot states map DSH data-state onto the plugin scheme', () => {
   assert.equal(dotStateFor({ dataState: 'running' }), 'running')
+  assert.equal(dotStateFor({ dataState: 'ongoing' }), 'running')
   assert.equal(dotStateFor({ dataState: 'warning' }), 'feedback')
   assert.equal(dotStateFor({ dataState: 'error' }), 'error')
   assert.equal(dotStateFor({ dataState: 'done' }), 'done')
@@ -27,8 +28,14 @@ test('unknown or missing states yield no dot', () => {
   assert.equal(dotStateFor({}), null)
   assert.equal(dotStateFor({ dataState: '' }), null)
   assert.equal(dotStateFor({ dataState: 'idle' }), null)
-  // 上游枚举变化（如 ongoing 事件重演）必须落到"无点"而不是抛错。
-  assert.equal(dotStateFor({ dataState: 'ongoing' }), null)
+  assert.equal(dotStateFor({ dataState: 'paused' }), null)
+})
+
+test('authoritative title only corrects the first cold paint', () => {
+  assert.equal(authoritativeTitleForFirstPaint({ firstPaint: true, rendered: '旧 header', authoritative: '最新标题' }), '最新标题')
+  assert.equal(authoritativeTitleForFirstPaint({ firstPaint: false, rendered: '刚刚重命名', authoritative: '旧快照' }), null)
+  assert.equal(authoritativeTitleForFirstPaint({ firstPaint: true, rendered: '最新标题', authoritative: '最新标题' }), null)
+  assert.equal(authoritativeTitleForFirstPaint({ firstPaint: true, rendered: '标题', authoritative: '' }), null)
 })
 
 // ---- canDropOnWorkspace：拖拽同工作区拦截 ----------------------------------

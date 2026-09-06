@@ -11,7 +11,7 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { canDropOnWorkspace, dotStateFor, sessionForNodes, starredOf, workspaceForNodes } from './logic.js'
+import { authoritativeTitleForFirstPaint, canDropOnWorkspace, dotStateFor, sessionForNodes, starredOf, workspaceForNodes } from './logic.js'
 
 export const inject = ['slots']
 
@@ -1129,7 +1129,7 @@ const SIDEBAR_AUG_CSS = `
 .dsm-sub-cur{font-size:11px;color:var(--dsw-alias-state-business-primary);flex:none;margin-left:8px}
 .dsm-dot{position:absolute;left:6px;top:50%;transform:translateY(-50%);width:8px;height:8px;border-radius:50%;box-sizing:border-box;cursor:pointer;pointer-events:auto;z-index:1}
 .dsm-dot-unread-manual{background:var(--dsw-alias-state-business-primary)}
-.dsm-dot-waiting{background:var(--dsw-alias-state-warning-primary)}
+.dsm-dot-waiting{background:var(--dsw-alias-state-warn-primary,#F59E0B)}
 .dsm-dot-unread{background:var(--dsw-alias-state-success-primary)}
 .dsm-drag-source{opacity:.48}
 .dsm-drop-target{position:relative;background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 10%,transparent)!important;outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px;border-radius:8px}
@@ -1465,7 +1465,7 @@ function installSidebarSessionMenuAug() {
 // Left-side per-session status dot (DOM shim). The color is driven by DSH's
 // REAL session status, read from the row's own StateDot ([data-state]):
 //   手动标记未读（蓝） = 用户在 ⋯ 菜单或点击圆点手动标记，localStorage 持久化（最高优先级）
-//   工作中（黄）       = DSH state 'running'
+//   工作中（黄）       = DSH state 'ongoing'（旧版兼容 'running'）
 //   需用户反馈（琥珀） = DSH state 'warning'（有追问需用户反馈）
 //   完成后未读（绿）   = DSH state 'done' 且用户尚未读过（read 集合）
 //   完成已读（不显示） = DSH state 'done' 且已读过（read 集合持久化）
@@ -1503,7 +1503,7 @@ function installSidebarStatusDots() {
   }
   // Dot colors per the user's scheme. We read DSH's REAL session status from the
   // row's own StateDot (its [data-state] attr) and recolor it:
-  //   running  → 黄  工作中
+  //   ongoing/running → 黄  工作中
   //   warning  → 琥珀 有追问需用户反馈
   //   done     → 绿  完成后未读（读过则不再显示）
   //   error    → 红  出错/需关注（与 DSH 自带 StateDot 一致）
@@ -1511,11 +1511,12 @@ function installSidebarStatusDots() {
   const COLOR = {
     manual: 'var(--dsw-alias-state-business-primary)',        // 蓝 手动标记未读
     running: '#EAB308',                                       // 黄 工作中 (DSH running)
-    feedback: 'var(--dsw-alias-state-warning-primary)',       // 琥珀 需用户反馈 (DSH warning)
+    feedback: 'var(--dsw-alias-state-warn-primary, #F59E0B)', // 琥珀 需用户反馈 (DSH warning)
     done: 'var(--dsw-alias-state-success-primary)',           // 绿 完成后未读 (DSH done)
     error: 'var(--dsw-alias-state-error-primary)',            // 红 出错/需关注 (DSH error)
   }
   const manualUnread = dsmLoadManual()
+  const titleInitializedRows = new WeakSet()
   const paint = () => {
     // Recompute the active session on every paint so the active row is never
     // shown from a stale `curActive` (the click that changes aria-selected
@@ -1549,12 +1550,20 @@ function installSidebarStatusDots() {
       // Session is opened. Paint the latest log-folded title from the host
       // authority without materializing the Session or changing its log.
       const authoritativeTitle = dsmAuthoritativeTitles.get(id)
-      if (authoritativeTitle) {
+      if (!titleInitializedRows.has(row)) {
         const node = rowNode(row) || {}
         const expected = new Set([node.title, node.displayTitle, node.name].filter((value) => typeof value === 'string'))
         const spans = [...row.children].filter((el) => el.tagName === 'SPAN' && !el.querySelector('[data-state]') && (el.textContent || '').trim())
         const titleEl = spans.find((el) => expected.has((el.textContent || '').trim())) || spans[0]
-        if (titleEl && titleEl.textContent !== authoritativeTitle) titleEl.textContent = authoritativeTitle
+        if (titleEl) {
+          const correction = authoritativeTitleForFirstPaint({
+            firstPaint: true,
+            rendered: titleEl.textContent || '',
+            authoritative: authoritativeTitle || '',
+          })
+          if (correction) titleEl.textContent = correction
+          titleInitializedRows.add(row)
+        }
       }
       // Read DSH's REAL session status from the row's own StateDot and recolor
       // it with the user's scheme (we also hide DSH's dot so only ours shows).

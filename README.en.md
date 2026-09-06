@@ -43,7 +43,7 @@ A small dot is rendered to the left of each session row. Its color is driven by 
 | Color | State | Description |
 |---|---|---|
 | 🔵 Blue | Manually marked unread | Toggle via the ⋯ menu or by clicking the dot; auto-cleared when the session is opened |
-| 🟡 Yellow | Working | The session is currently running (`running`) |
+| 🟡 Yellow | Working | The session is currently running (`ongoing`, with legacy `running` compatibility) |
 | 🟠 Amber | Awaiting feedback | The session has a follow-up question and is waiting for your input or confirmation (`warning`) |
 | 🟢 Green | Completed but unread | The session is done (`done`) but you haven't reopened it yet; disappears after you view it |
 | 🔴 Red | Error / needs attention | The session hit an error (`error`) |

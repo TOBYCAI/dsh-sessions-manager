@@ -7,11 +7,11 @@
 // (workspaceRegistry + storageDomain), folds titles/dates/workspace tags from
 // session persistence, physically removes a session's log file on delete, and
 // relocates a conversation (session) between workspaces on move.
-import { mkdir, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { rewriteFrame0Cwd } from './zstd-frame.js'
+import { rewriteFrame0CwdInMemory, scanZstdFrames } from './zstd-frame.js'
 import { renderSessionMarkdown } from './markdown.js'
 import { createStarIndex } from './star-index.js'
 import { aggregateStorage } from './storage-stats.js'
@@ -637,15 +637,36 @@ export function apply(ctx) {
       const newPath = locatePath(newHeaderObj)
       if (!oldPath || !newPath || oldPath === newPath) return false
       const backupPath = `${oldPath}.move-backup-${Date.now()}`
+      const stagedPath = `${newPath}.move-stage-${process.pid}-${Date.now()}`
+      let destinationInstalled = false
       try {
         // Ensure the destination project directory exists (rename does not
         // create it). Without this, the rename silently no-ops on ENOENT and
         // the log stays put while workspace.json is wrongly updated.
         await mkdir(dirname(newPath), { recursive: true })
-        await rename(oldPath, backupPath)             // current log to safety
-        await rewriteFrame0Cwd(backupPath, canonical) // frame0 cwd -> newPath
-        await rename(backupPath, newPath)             // relocate to the new workspace dir
+        try {
+          await stat(newPath)
+          throw new Error('移动失败：目标位置已存在同名会话日志')
+        } catch (e) {
+          if (e && e.code !== 'ENOENT') throw e
+        }
+        await rename(oldPath, backupPath) // keep the original byte-identical until verification succeeds
+        const original = await readFile(backupPath)
+        const originalFrames = scanZstdFrames(original).frames
+        if (originalFrames.length === 0) throw new Error('移动前校验失败：会话日志没有完整 zstd 帧')
+        const rewritten = rewriteFrame0CwdInMemory(original, canonical)
+        const rewrittenFrames = scanZstdFrames(rewritten).frames
+        if (rewrittenFrames.length !== originalFrames.length) throw new Error('移动后校验失败：会话日志帧数发生变化')
+        const originalTail = original.subarray(originalFrames[0].end)
+        const rewrittenTail = rewritten.subarray(rewrittenFrames[0].end)
+        if (!originalTail.equals(rewrittenTail)) throw new Error('移动后校验失败：会话事件内容发生变化')
+        await writeFile(stagedPath, rewritten, { mode: 0o600 })
+        await rename(stagedPath, newPath)
+        destinationInstalled = true
+        await unlink(backupPath)
       } catch (e) {
+        try { await unlink(stagedPath) } catch (_) {}
+        if (destinationInstalled) { try { await unlink(newPath) } catch (_) {} }
         try { await rename(backupPath, oldPath) } catch (_) {}
         if (e && e.code !== 'ENOENT') throw e
         return false

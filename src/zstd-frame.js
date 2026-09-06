@@ -20,33 +20,71 @@ export const ZSTD_MAGIC = 0xFD2FB528
 const CHECKSUM_OPTS = { params: { [zlib.constants.ZSTD_c_checksumFlag]: 1 } }
 
 /**
- * Locate real zstd frame boundaries in a concatenated-frame buffer.
- *
- * Scanning for the 4-byte magic alone produces FALSE POSITIVES: the same byte
- * sequence can occur inside compressed data. Every candidate is therefore
- * validated by attempting decompression; only offsets that decode are kept.
+ * Parse complete concatenated Zstandard frames without decompressing them.
+ * Invalid complete structure rejects; EOF inside the final frame is reported
+ * as torn rather than guessed from magic bytes occurring in compressed data.
  *
  * @param {Buffer} buf
- * @returns {number[]} ascending offsets of real frame starts
+ * @param {number} maxFrames
+ * @returns {{frames: Array<{start:number,end:number}>, tornStart?: number}}
  */
-export function findZstdFrameStarts(buf) {
-  const starts = []
-  for (let i = 0; i + 4 <= buf.length; i++) {
-    if (buf.readUInt32LE(i) !== ZSTD_MAGIC) continue
-    try {
-      // Two checks are needed, not just one:
-      //  - a magic inside compressed data fails to decode and throws
-      //  - a BARE 4-byte magic at the very end of the buffer decodes to an
-      //    EMPTY result without throwing, so non-empty output is required too
-      // Every real frame carries at least one JSON line, so neither case can
-      // be a genuine frame start.
-      const out = zlib.zstdDecompressSync(buf.subarray(i, i + Math.min(buf.length - i, 1000000)))
-      if (out.length > 0) starts.push(i)
-    } catch (_) {
-      // Not a real frame boundary — the magic bytes occurred inside compressed data.
+export function scanZstdFrames(buf, maxFrames = Number.POSITIVE_INFINITY) {
+  const frames = []
+  let offset = 0
+  while (offset < buf.length) {
+    const start = offset
+    if (buf.length - offset < 4) return { frames, tornStart: start }
+    if (buf.readUInt32LE(offset) !== ZSTD_MAGIC) {
+      throw new Error(`会话日志格式异常（字节 ${offset} 的 zstd magic 无效）`)
     }
+    offset += 4
+    if (offset === buf.length) return { frames, tornStart: start }
+
+    const descriptor = buf.readUInt8(offset++)
+    if ((descriptor & 0x18) !== 0) throw new Error(`会话日志格式异常（字节 ${offset - 1} 使用保留帧头位）`)
+    const contentSizeFlag = descriptor >>> 6
+    const singleSegment = (descriptor & 0x20) !== 0
+    const checksum = (descriptor & 0x04) !== 0
+    const dictionaryFlag = descriptor & 0x03
+    const dictionaryBytes = dictionaryFlag === 3 ? 4 : dictionaryFlag
+    const contentSizeBytes = contentSizeFlag === 0 ? (singleSegment ? 1 : 0) : 1 << contentSizeFlag
+    const remainingHeaderBytes = (singleSegment ? 0 : 1) + dictionaryBytes + contentSizeBytes
+    if (buf.length - offset < remainingHeaderBytes) return { frames, tornStart: start }
+    offset += remainingHeaderBytes
+
+    for (;;) {
+      if (buf.length - offset < 3) return { frames, tornStart: start }
+      const blockHeader = buf.readUIntLE(offset, 3)
+      offset += 3
+      const lastBlock = (blockHeader & 1) !== 0
+      const blockType = (blockHeader >>> 1) & 0x03
+      const blockSize = blockHeader >>> 3
+      if (blockType === 0x03) throw new Error(`会话日志格式异常（字节 ${offset - 3} 使用保留块类型）`)
+      const payloadBytes = blockType === 0x01 ? 1 : blockSize
+      if (buf.length - offset < payloadBytes) return { frames, tornStart: start }
+      offset += payloadBytes
+      if (lastBlock) break
+    }
+    if (checksum) {
+      if (buf.length - offset < 4) return { frames, tornStart: start }
+      offset += 4
+    }
+    frames.push({ start, end: offset })
+    if (frames.length === maxFrames) return { frames }
   }
-  return starts
+  return { frames }
+}
+
+/** Backward-compatible frame-start view used by diagnostics and tests. */
+export function findZstdFrameStarts(buf) {
+  return scanZstdFrames(buf).frames.map((frame) => frame.start)
+}
+
+function firstFrame(buf) {
+  const scan = scanZstdFrames(buf, 1)
+  const frame = scan.frames[0]
+  if (!frame) throw new Error('会话日志格式异常（无完整 zstd 帧）')
+  return frame
 }
 
 /**
@@ -64,10 +102,9 @@ export function findZstdFrameStarts(buf) {
  */
 export function rewriteFrame0Cwd(filePath, newCwd) {
   const buf = readFileSync(filePath)
-  const starts = findZstdFrameStarts(buf)
-  if (starts.length === 0) throw new Error('会话日志格式异常（无 zstd 帧）')
-  const end0 = starts.length > 1 ? starts[1] : buf.length
-  const frame0 = buf.subarray(starts[0], end0)
+  const frame = firstFrame(buf)
+  const end0 = frame.end
+  const frame0 = buf.subarray(frame.start, end0)
   const text = zlib.zstdDecompressSync(frame0).toString('utf8')
   const nl = text.indexOf('\n')
   const line = nl >= 0 ? text.slice(0, nl) : text
@@ -91,10 +128,9 @@ export function rewriteFrame0Cwd(filePath, newCwd) {
  * @returns {Buffer} rewritten log
  */
 export function rewriteFrame0CwdInMemory(buf, newCwd) {
-  const starts = findZstdFrameStarts(buf)
-  if (starts.length === 0) throw new Error('会话日志格式异常（无 zstd 帧）')
-  const end0 = starts.length > 1 ? starts[1] : buf.length
-  const frame0 = buf.subarray(starts[0], end0)
+  const frame = firstFrame(buf)
+  const end0 = frame.end
+  const frame0 = buf.subarray(frame.start, end0)
   const text = zlib.zstdDecompressSync(frame0).toString('utf8')
   const nl = text.indexOf('\n')
   const line = nl >= 0 ? text.slice(0, nl) : text
@@ -128,10 +164,8 @@ export function buildSessionLog(header, events = []) {
  * @returns {{obj: object, lineCount: number}}
  */
 export function readFrame0(buf) {
-  const starts = findZstdFrameStarts(buf)
-  if (starts.length === 0) throw new Error('会话日志格式异常（无 zstd 帧）')
-  const end0 = starts.length > 1 ? starts[1] : buf.length
-  const text = zlib.zstdDecompressSync(buf.subarray(starts[0], end0)).toString('utf8')
+  const frame = firstFrame(buf)
+  const text = zlib.zstdDecompressSync(buf.subarray(frame.start, frame.end)).toString('utf8')
   const lines = text.split('\n').filter((l) => l.length > 0)
   return { obj: JSON.parse(lines[0]), lineCount: lines.length }
 }

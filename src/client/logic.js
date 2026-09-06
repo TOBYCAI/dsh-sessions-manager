@@ -10,12 +10,20 @@
 export function dotStateFor({ manualUnread = false, dataState = '', isActive = false } = {}) {
   if (manualUnread) return 'manual'
   switch (dataState) {
+    case 'ongoing':
     case 'running': return 'running'
     case 'warning': return 'feedback'
     case 'error': return 'error'
     case 'done': return isActive ? null : 'done'
     default: return null
   }
+}
+
+// 权威标题只修正新出现 DOM 行的冷态标题。行一旦完成首次 paint，后续文本
+// 变化属于 DSH Core 的实时更新（例如重命名），插件不得再用轮询快照覆盖。
+export function authoritativeTitleForFirstPaint({ firstPaint = false, rendered = '', authoritative = '' } = {}) {
+  if (!firstPaint || !authoritative || rendered === authoritative) return null
+  return authoritative
 }
 
 // 拖拽迁移前置校验：同工作区拦截（workspacePath 相等即拒绝）。

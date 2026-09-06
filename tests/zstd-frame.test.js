@@ -11,6 +11,7 @@
 //   2. a non-session frame0 is rejected, never rewritten
 
 import assert from 'node:assert/strict'
+import { randomBytes } from 'node:crypto'
 import { test } from 'node:test'
 import zlib from 'node:zlib'
 import {
@@ -19,6 +20,7 @@ import {
   findZstdFrameStarts,
   readFrame0,
   rewriteFrame0CwdInMemory,
+  scanZstdFrames,
 } from '../src/zstd-frame.js'
 
 // zstd magic bytes in file order (28 B5 2F FD) — the little-endian uint32
@@ -45,18 +47,10 @@ test('findZstdFrameStarts: locates every frame of a well-formed log', () => {
   assert.deepEqual(starts, [...starts].sort((a, b) => a - b), 'offsets ascending')
 })
 
-test('findZstdFrameStarts: ignores a magic followed by undecodable data', () => {
-  // Regression: the old implementation accepted every 4-byte magic match, so a
-  // magic sequence occurring inside a frame's payload was treated as the start
-  // of the next frame — slicing frame0 wrong and corrupting the log.
+test('findZstdFrameStarts: rejects junk after a complete frame instead of guessing', () => {
   const realFrame = zlib.zstdCompressSync(Buffer.from(JSON.stringify(sessionHeader()) + '\n'))
   const buf = Buffer.concat([realFrame, Buffer.from('not a zstd frame at all'), MAGIC_BYTES, Buffer.from('tail')])
-
-  assert.deepEqual(
-    findZstdFrameStarts(buf),
-    [0],
-    'only the real frame is recognised; the undecodable magic is filtered out',
-  )
+  assert.throws(() => findZstdFrameStarts(buf), /magic 无效/)
 })
 
 test('findZstdFrameStarts: ignores a bare trailing magic', () => {
@@ -102,6 +96,26 @@ test('rewriteFrame0Cwd: updates cwd and preserves every subsequent frame byte-fo
   )
 })
 
+test('rewriteFrame0Cwd: preserves every byte after frame0 in a multi-megabyte seeded log', () => {
+  const events = Array.from({ length: 14 }, (_, seq) => ({
+    type: seq === 0 ? 'session/end-seed' : 'agent/message',
+    seq,
+    data: randomBytes(180000).toString('base64'),
+  }))
+  const log = buildSessionLog({ ...sessionHeader('/workspaces/alpha'), seedLength: 6 }, events)
+  assert.ok(log.length > 2000000, `fixture must exceed the removed 1 MB scan window: ${log.length}`)
+
+  const originalFrames = scanZstdFrames(log).frames
+  const next = rewriteFrame0CwdInMemory(log, '/workspaces/beta')
+  const nextFrames = scanZstdFrames(next).frames
+  assert.equal(nextFrames.length, originalFrames.length)
+  assert.deepEqual(next.subarray(nextFrames[0].end), log.subarray(originalFrames[0].end))
+
+  const decodedEvents = nextFrames.slice(1).map(({ start, end }) =>
+    JSON.parse(zlib.zstdDecompressSync(next.subarray(start, end)).toString('utf8')))
+  assert.deepEqual(decodedEvents.map((event) => event.seq), events.map((event) => event.seq))
+})
+
 test('rewriteFrame0Cwd: rejects a corrupted frame0 instead of baking it in', () => {
   // Regression: this is the exact shape of the file that broke `dsm web` —
   // frame0 held an event record, not a session header. The old code would have
@@ -122,7 +136,7 @@ test('rewriteFrame0Cwd: rejects a corrupted frame0 instead of baking it in', () 
 test('rewriteFrame0Cwd: rejects a log with no decodable zstd frame', () => {
   assert.throws(
     () => rewriteFrame0CwdInMemory(Buffer.from('plain text, not zstd'), '/workspaces/beta'),
-    /无 zstd 帧/,
+    /无完整 zstd 帧|magic 无效/,
   )
 })
 
