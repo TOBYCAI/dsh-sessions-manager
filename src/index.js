@@ -625,9 +625,11 @@ export function apply(ctx) {
       const entry = store.items.find((t) => String(t.sessionId) === sid)
       if (!entry) { const error = new Error('回收站中找不到该会话'); error.status = 404; throw error }
       let target = null
+      let locatedHeader = null
       try {
         const entries = await persistence.listEntries()
         const current = entries.find((entry) => entry.id === sid)
+        locatedHeader = current ? current.header : null
         const located = current && persistence.locate(current.header)
         if (located && typeof located.path === 'string') target = located.path
       } catch (e) {}
