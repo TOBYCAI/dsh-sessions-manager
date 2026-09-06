@@ -1353,9 +1353,15 @@ function installSidebarSessionMenuAug() {
     sub.setAttribute('data-dsm-sub', '')
     sub.innerHTML = '<div class="dsm-sub-loading">加载工作区…</div>'
     const r = moveBtn.getBoundingClientRect()
-    sub.style.top = Math.max(8, Math.round(r.top - 4)) + 'px'
-    sub.style.left = Math.round(r.right + 10) + 'px'
+    // Fixed-position card: once the async content renders it can be tall or
+    // wide enough to hang past the viewport edges, so re-clamp both anchors
+    // against the rendered size.
+    const placeSub = () => {
+      sub.style.top = Math.max(8, Math.min(Math.round(r.top - 4), window.innerHeight - sub.offsetHeight - 8)) + 'px'
+      sub.style.left = Math.max(8, Math.min(Math.round(r.right + 10), window.innerWidth - sub.offsetWidth - 8)) + 'px'
+    }
     document.body.appendChild(sub)
+    placeSub()
     const closeSub = () => {
       activeSubClose = null
       if (sub.parentNode) sub.remove()
@@ -1384,7 +1390,7 @@ function installSidebarSessionMenuAug() {
       const items = ws.items || []
       const cur = (sess.items || []).find((x) => x.sessionId === info.id)
       const curPath = cur ? cur.workspacePath : (info.cwd || null)
-      if (!items.length) { sub.innerHTML = '<div class="dsm-sub-empty">（暂无可用工作区）</div>'; return }
+      if (!items.length) { sub.innerHTML = '<div class="dsm-sub-empty">（暂无可用工作区）</div>'; placeSub(); return }
       sub.innerHTML = ''
       items.forEach((w) => {
         const isCur = !!curPath && w.path === curPath
@@ -1414,8 +1420,10 @@ function installSidebarSessionMenuAug() {
         })
         sub.appendChild(b)
       })
+      placeSub()
     }).catch((e) => {
       sub.innerHTML = '<div class="dsm-sub-err">' + escapeHtml(String((e && e.message) || e)) + '</div>'
+      placeSub()
     })
   }
   const openDeleteConfirm = (id) => {
@@ -1510,6 +1518,11 @@ function installSidebarSessionMenuAug() {
     viewport.appendChild(del.wrap)
     // 标记未读 goes to the very top of the menu (above DSH's native items).
     viewport.insertBefore(mark.wrap, viewport.firstElementChild)
+    // DSH's portalled Menu clamped its position using the height it measured
+    // before this shim injected rows, so the grown card can hang past the
+    // viewport bottom and cover the sidebar foot. Reuse the host's own
+    // placement by firing the resize event it listens for while open.
+    window.dispatchEvent(new Event('resize'))
   }
 
   const seen = new WeakSet()
