@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { renderSessionMarkdown, summarizeToolArguments } from '../src/markdown.js'
+import { renderSessionMarkdown, createSessionMarkdownBuilder, summarizeToolArguments } from '../src/markdown.js'
 
 const META = { id: 'session-abc', cwd: '/work/project', createdAt: 1787190197938 }
 
@@ -137,4 +137,31 @@ test('summarizeToolArguments prefers meaningful keys and tolerates junk', () => 
 test('quotes front matter values that would break YAML', () => {
   const md = renderSessionMarkdown({ id: 's1', title: 'a: b "c"\nsecond' }, [])
   assert.ok(md.includes('title: "a: b \\"c\\"\\nsecond"'))
+})
+
+// ---- 流式构建器（SessionHandle.read 分块导出用）----------------------------
+
+const STREAM_EVENTS = [
+  { type: 'session/title', data: { title: 'first' } },
+  { type: 'turn/start', data: { turn: 1 } },
+  { type: 'user/message', data: { content: [{ type: 'text', text: '你好' }] } },
+  { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '在的' }] } } },
+  { type: 'session/title', data: { title: 'renamed' } },
+  { type: 'tool/call', data: { name: 'write', arguments: JSON.stringify({ file_path: '/a.md' }) } },
+]
+
+test('streaming builder output is byte-identical to the one-shot renderer', () => {
+  const oneShot = renderSessionMarkdown(META, STREAM_EVENTS, { exportedAt: 1787190197938 })
+  const builder = createSessionMarkdownBuilder(META, { exportedAt: 1787190197938 })
+  // 以 2 个事件为一块流式喂入（模拟 handle.read offset/length 分页）
+  for (let i = 0; i < STREAM_EVENTS.length; i += 2) builder.addEvents(STREAM_EVENTS.slice(i, i + 2))
+  assert.equal(builder.finish(), oneShot)
+})
+
+test('finish(metaOverride) lets a late header replace front matter fields', () => {
+  const builder = createSessionMarkdownBuilder({ id: 'session-abc' })
+  builder.addEvents(STREAM_EVENTS)
+  const md = builder.finish({ id: 'session-abc', cwd: '/late/cwd', createdAt: 1787190197938 })
+  assert.match(md, /cwd: "\/late\/cwd"/)
+  assert.match(md, /# renamed/, 'front-matter title must be the LAST session/title event')
 })

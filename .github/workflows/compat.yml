@@ -71,6 +71,73 @@ jobs:
         if: needs.resolve-versions.outputs.prerelease != ''
         run: node scripts/check-upstream-contract.mjs "${{ needs.resolve-versions.outputs.prerelease }}"
 
+  # 真实 runtime 集成冒烟：clone 官方 prerelease tag → pnpm 安装并构建 →
+  # 用官方 JSONL 后端跑 scripts/compat-runtime.mjs（list/stat/bounded read/
+  # 单次 close/能力门控）。上游构建偶发不稳定，job 级 continue-on-error，
+  # 但失败仍会开 issue 留痕——静态契约检查不能替代运行验证。
+  upstream-integration:
+    name: upstream runtime smoke ${{ needs.resolve-versions.outputs.prerelease }}
+    needs: [resolve-versions]
+    if: needs.resolve-versions.outputs.prerelease != '' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Checkout official harness at prerelease tag
+        uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: ${{ needs.resolve-versions.outputs.prerelease }}
+          path: harness
+      - name: Install harness workspace
+        working-directory: harness
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+      - name: Build harness packages
+        working-directory: harness
+        run: pnpm -r build
+      - name: Run real-runtime compat smoke
+        id: smoke
+        run: node scripts/compat-runtime.mjs "$GITHUB_WORKSPACE/harness"
+      - name: Open/update issue on failure
+        if: steps.smoke.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = '⚠️ 官方 prerelease 真实 runtime 冒烟失败（' + process.env.PRERELEASE + '）'
+            const body = [
+              'compat-runtime 对官方 `' + process.env.PRERELEASE + '` 的真实构建失败。',
+              '适配层 / 能力矩阵 / 有界读取行为可能与上游公共契约出现漂移，需人工核对。',
+              '',
+              'Run: https://github.com/' + process.env.GITHUB_REPOSITORY + '/actions/runs/' + process.env.RUN_ID,
+            ].join('\n')
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', per_page: 100,
+            })
+            const hit = existing.data.find((i) => i.title.includes('真实 runtime 冒烟失败'))
+            if (hit) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: hit.number, body,
+              })
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: ['compat'],
+              })
+            }
+        env:
+          PRERELEASE: ${{ needs.resolve-versions.outputs.prerelease }}
+          RUN_ID: ${{ github.run_id }}
+
   smoke:
     name: runtime smoke ${{ matrix.version }}
     needs: [build, resolve-versions]

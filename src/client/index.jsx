@@ -21,12 +21,12 @@ function loadPanelPrefs() {
 }
 
 const CSS = `
-.archv{--dsm-radius-tag:4px;display:flex;flex-direction:column;gap:4px;max-width:800px;padding:8px 2px 28px}
+.archv{--dsm-radius-tag:4px;--dsm-radius-ctl:9px;--dsm-radius-sheet:10px;--dsm-radius-card:12px;display:flex;flex-direction:column;gap:4px;max-width:800px;padding:8px 2px 28px}
 .archv-head{display:flex;align-items:center;gap:10px;margin:0 0 2px}
 .archv-title{font-size:16px;font-weight:650;color:var(--dsw-alias-label-primary);letter-spacing:-0.01em;margin:0}
 .archv-count{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-fill-subtle);border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:1px 8px;flex:none}
 .archv-sub{font-size:12px;line-height:1.55;color:var(--dsw-alias-label-tertiary);margin:0 0 12px;max-width:64ch}
-.archv-err{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 12px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,transparent);border-radius:10px;color:var(--dsw-alias-state-error-primary);font-size:12px;margin-bottom:10px}
+.archv-err{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 12px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,transparent);border-radius:var(--dsm-radius-sheet);color:var(--dsw-alias-state-error-primary);font-size:12px;margin-bottom:10px}
 .archv-errretry{appearance:none;border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 45%,transparent);background:transparent;color:inherit;border-radius:8px;padding:4px 10px;font-size:11px;cursor:pointer;flex:none}
 .sess-filter{display:flex;align-items:center;gap:6px;margin:0 0 12px}
 .sess-fbtn{appearance:none;min-height:30px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-secondary);border-radius:999px;font-size:12px;font-weight:500;cursor:pointer}
@@ -35,13 +35,13 @@ const CSS = `
 .sess-tools{display:grid;grid-template-columns:minmax(180px,1fr) minmax(140px,.7fr) minmax(130px,.55fr);gap:8px;margin:0 0 8px}
 .sess-field{display:flex;flex-direction:column;gap:5px;min-width:0}
 .sess-field label{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary)}
-.sess-field input,.sess-field select{box-sizing:border-box;width:100%;min-height:36px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}
+.sess-field input,.sess-field select{box-sizing:border-box;width:100%;min-height:36px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}
 .sess-results{font-size:11px;color:var(--dsw-alias-label-tertiary);margin:0 0 4px}
 .archv button:focus-visible,.archv input:focus-visible,.archv select:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
 .sess-batch{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 2px 4px;margin-bottom:4px}
 .sess-btntext{font-size:12px;color:var(--dsw-alias-label-tertiary);flex:none}
 .archv-list{display:flex;flex-direction:column;gap:8px}
-.archv-card{display:flex;flex-direction:column;align-items:stretch;gap:0;padding:12px 14px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-fill-elevated);transition:border-color .15s ease,background-color .15s ease}
+.archv-card{display:flex;flex-direction:column;align-items:stretch;gap:0;padding:12px 14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-card);background:var(--dsw-alias-fill-elevated);transition:border-color .15s ease,background-color .15s ease}
 .archv-card:hover{border-color:var(--dsw-alias-border-l4)}
 .archv-card-exp{border-color:var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-1)}
 .archv-row{display:flex;align-items:center;gap:14px;width:100%;min-width:0}
@@ -62,16 +62,16 @@ const CSS = `
 .archv-star-on svg{fill:currentColor}
 .archv-body{flex:1;min-width:0;display:flex;align-items:center;gap:12px}
 .archv-actions{display:flex;gap:8px;flex:none;flex-wrap:nowrap;justify-content:flex-end}
-.archv-btn{appearance:none;min-height:32px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-secondary);border-radius:9px;font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-align:center;transition:background-color .15s ease,border-color .15s ease,color .15s ease}
+.archv-btn{appearance:none;min-height:32px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-secondary);border-radius:var(--dsm-radius-ctl);font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-align:center;transition:background-color .15s ease,border-color .15s ease,color .15s ease}
 .archv-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .archv-btn:disabled{opacity:.5;cursor:default}
 .archv-del{color:var(--dsw-alias-state-error-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 45%,transparent)}
 .archv-del:hover:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent);color:var(--dsw-alias-state-error-primary)}
 .archv-go{color:var(--dsw-alias-state-business-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 45%,transparent)}
 .archv-go:hover:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 10%,transparent);color:var(--dsw-alias-state-business-primary)}
-.archv-empty{display:flex;align-items:center;gap:10px;padding:20px 14px;border:1px dashed var(--dsw-alias-border-l3);border-radius:12px;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}
+.archv-empty{display:flex;align-items:center;gap:10px;padding:20px 14px;border:1px dashed var(--dsw-alias-border-l3);border-radius:var(--dsm-radius-card);color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}
 .archv-skel{display:flex;flex-direction:column;gap:8px}
-.archv-skel-card{height:58px;border-radius:12px;background:var(--dsw-alias-fill-subtle);position:relative;overflow:hidden}
+.archv-skel-card{height:58px;border-radius:var(--dsm-radius-card);background:var(--dsw-alias-fill-subtle);position:relative;overflow:hidden}
 .archv-skel-card::after{content:'';position:absolute;inset:0;transform:translateX(-100%);background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--dsw-alias-fill-elevated) 75%,transparent),transparent);animation:archv-shimmer 1.4s infinite}
 .archv-status{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:60;background:var(--dsw-alias-fill-elevated);border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary);padding:9px 16px;border-radius:999px;font-size:12px;box-shadow:0 8px 24px rgb(0 0 0/.18);display:flex;align-items:center;gap:8px;animation:archv-pop .18s ease-out;max-width:min(90vw,420px)}
 .archv-spin{width:12px;height:12px;border:2px solid color-mix(in srgb,var(--dsw-alias-label-secondary) 35%,transparent);border-top-color:var(--dsw-alias-label-secondary);border-radius:50%;animation:archv-rot .8s linear infinite;flex:none}
@@ -80,24 +80,24 @@ const CSS = `
 @keyframes archv-pop{from{opacity:0;transform:translateX(-50%) translateY(10px)}}
 @media (prefers-reduced-motion:reduce){.archv-skel-card::after{animation:none}.archv-card,.archv-btn{transition:none}.archv-status,.archv-spin{animation:none}}
 @media (max-width:640px){.archv-card{flex-direction:column;align-items:stretch;gap:10px}.archv-actions{justify-content:flex-end}.sess-tools{grid-template-columns:1fr}.sess-fbtn,.archv-btn{min-height:40px}}
-.mv-sheet{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:12px;margin-top:12px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-fill-subtle)}
+.mv-sheet{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:12px;margin-top:12px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-sheet);background:var(--dsw-alias-fill-subtle)}
 .mv-sheet-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .mv-sheet-title{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary);margin:0}
 .mv-sheet-close{appearance:none;width:26px;height:26px;color:var(--dsw-alias-label-secondary);background:0 0;border:none;border-radius:7px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:16px;line-height:1}
 .mv-sheet-close:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.mv-seg{display:flex;gap:2px;padding:2px;background:var(--dsw-alias-fill-elevated);border:1px solid var(--dsw-alias-border-l2);border-radius:10px;width:100%}
+.mv-seg{display:flex;gap:2px;padding:2px;background:var(--dsw-alias-fill-elevated);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-sheet);width:100%}
 .mv-segbtn{appearance:none;flex:1;min-height:30px;padding:0 12px;border:none;background:transparent;color:var(--dsw-alias-label-secondary);border-radius:8px;font-size:12px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px}
 .mv-segbtn:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
 .mv-segbtn-on{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);box-shadow:0 1px 2px rgb(0 0 0/.08)}
 .mv-field{display:flex;flex-direction:column;gap:6px}
 .mv-field label.mv-field-label{font-size:12px;font-weight:500;color:var(--dsw-alias-label-secondary)}
-.mv-field select,.mv-field input[type=text]{box-sizing:border-box;appearance:none;width:100%;min-height:34px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);font-size:12px;font-family:inherit}
+.mv-field select,.mv-field input[type=text]{box-sizing:border-box;appearance:none;width:100%;min-height:34px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);font-size:12px;font-family:inherit}
 .mv-field select:focus-visible,.mv-field input[type=text]:focus-visible,.mv-sheet-close:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
 .mv-browse-row{display:flex;align-items:center;gap:8px}
 .mv-browse-row input[type=text]{flex:1;min-width:0}
 .mv-foot{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-top:2px}
 @media (max-width:640px){.archv-row{flex-wrap:wrap}.mv-sheet{padding:12px}}
-.dtl-sheet{margin-top:12px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-fill-subtle)}
+.dtl-sheet{margin-top:12px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-sheet);background:var(--dsw-alias-fill-subtle)}
 .dtl-sheet-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .dtl-sheet-title{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary);margin:0}
 .dtl-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin-top:10px}
@@ -118,7 +118,7 @@ const CSS = `
 .more-wrap{position:relative;flex:none}
 .more-btn{appearance:none;width:28px;height:28px;border:none;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;line-height:1}
 .more-btn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.more-menu{position:absolute;top:calc(100% + 4px);right:0;z-index:60;min-width:160px;padding:5px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l3);border-radius:10px;box-shadow:0 10px 32px rgb(0 0 0/.24);display:flex;flex-direction:column;gap:1px}
+.more-menu{position:absolute;top:calc(100% + 4px);right:0;z-index:60;min-width:160px;padding:5px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l3);border-radius:var(--dsm-radius-sheet);box-shadow:0 10px 32px rgb(0 0 0/.24);display:flex;flex-direction:column;gap:1px}
 .more-item{appearance:none;display:flex;align-items:center;gap:8px;width:100%;padding:7px 10px;border:none;background:transparent;color:var(--dsw-alias-label-primary);border-radius:7px;font-size:12.5px;cursor:pointer;white-space:nowrap;text-align:left}
 .more-item:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .more-item-danger{color:var(--dsw-alias-state-error-primary)}
@@ -396,9 +396,14 @@ function SessionPanel({ workspacesSvc }) {
     const w = workspaces.find((x) => x.workspaceId === id)
     return w ? w.path : ''
   }
-  const actionCapability = (name) => (capabilities && capabilities.actions && capabilities.actions[name]) || { available: false, reason: '正在检查当前 DSH 的兼容能力…' }
-  const canPurge = actionCapability('purge')
-  const canMove = actionCapability('move')
+  // 能力读取：优先 v3.5.2 规范键名，回退旧键名（旧 host / 缓存响应兼容）。
+  const actionCapability = (name, legacy) => {
+    const source = capabilities && capabilities.actions
+    return (source && (source[name] || (legacy && source[legacy]))) || { available: false, reason: '正在检查当前 DSH 的兼容能力…' }
+  }
+  const canPurge = actionCapability('physicalPurge', 'purge')
+  const canMove = actionCapability('relocateSession', 'move')
+  const canRestoreTrash = actionCapability('restoreIndexedSession', 'restoreTrash')
 
   const archivedList = sessions ? sessions.filter((x) => x.archived) : []
   const activeList = sessions ? sessions.filter((x) => !x.archived) : []
@@ -533,7 +538,12 @@ function SessionPanel({ workspacesSvc }) {
     if (trashBusy) return
     setTrashBusy(sid)
     postJSON('/archived-sessions/trash/restore', { sessionId: sid })
-      .then(() => { setTrashBusy(null); showToast('已恢复会话'); loadTrash(); refresh() })
+      .then((r) => {
+        setTrashBusy(null)
+        showToast(r && r.workspaceGone ? '已恢复会话（原工作区已删除，会话暂归「未分组」）' : '已恢复会话')
+        loadTrash()
+        refresh()
+      })
       .catch((e) => { setTrashBusy(null); setError(String((e && e.message) || e)) })
   }
   const purgeTrash = (sid) => {
@@ -1052,9 +1062,14 @@ function SessionPanel({ workspacesSvc }) {
             </select>
           </div>
           <div className="sess-field"><label>数据检查</label><button type="button" className="archv-btn" disabled={trashBusy !== null} onClick={verifyTrash}>{trashBusy === '__verify' ? '校验中…' : '校验日志完整性'}</button></div>
-          <div className="sess-field"><label>永久清理</label><button type="button" className="archv-btn archv-del" disabled={trashBusy !== null || !trash.length || !canPurge.available} title={!canPurge.available ? canPurge.reason : undefined} onClick={() => setPurgeTarget('__all')}>清空回收站</button></div>
+          <div className="sess-field"><label>永久清理</label><button type="button" className="archv-btn archv-del" disabled={trashBusy !== null || !trash.length || !canPurge.available} aria-disabled={!canPurge.available} title={!canPurge.available ? canPurge.reason : '物理删除这些日志，释放磁盘空间'} onClick={() => setPurgeTarget('__all')}>清空回收站</button></div>
         </div>
-        {!canPurge.available && <div className="archv-empty" role="status">{canPurge.reason}</div>}
+        {!canPurge.available && (
+          <div className="archv-empty" role="status">
+            {canPurge.reason}。回收站条目会一直保留，可随时恢复；当前 DSH 版本下移入回收站<b>不会释放磁盘空间</b>，会话日志仍完整保留在原工作区目录。
+          </div>
+        )}
+        <div className="dtl-note">回收站是软删除：日志仍留在原工作区目录，「彻底删除」才是真正释放磁盘空间的一步（当前版本未支持时会保持禁用）。</div>
         {trashCheck && <div className={trashCheck.missing ? 'archv-err' : 'archv-empty'} role="status">校验完成：{trashCheck.healthy} 条正常，{trashCheck.missing} 条日志缺失，{trashCheck.unverified || 0} 条无法直接核验。</div>}
         {trash.length === 0 ? (
           <div className="dsm-trash-empty">回收站为空。删除的会话会先进入这里，可恢复或彻底删除。</div>
@@ -1065,7 +1080,7 @@ function SessionPanel({ workspacesSvc }) {
                 <span className="dsm-trash-name" title={t.sessionId}>{t.title || t.sessionId}</span>
                 <span className="dsm-trash-date">{fmtDate(t.deletedAt)}</span>
                 <span className="dsm-trash-actions">
-                  <button type="button" className="archv-btn" disabled={trashBusy !== null} onClick={() => restoreTrash(t.sessionId)}>恢复</button>
+                  <button type="button" className="archv-btn" disabled={trashBusy !== null || !canRestoreTrash.available} title={!canRestoreTrash.available ? canRestoreTrash.reason : '恢复到删除前的位置与归档状态'} onClick={() => restoreTrash(t.sessionId)}>恢复</button>
                   <button type="button" className="archv-btn archv-del" disabled={trashBusy !== null || !canPurge.available} title={!canPurge.available ? canPurge.reason : undefined} onClick={() => setPurgeTarget(t.sessionId)}>彻底删除</button>
                 </span>
               </div>
@@ -1077,7 +1092,7 @@ function SessionPanel({ workspacesSvc }) {
         <div className="dlg-backdrop" onClick={() => setPurgeTarget(null)}>
           <div ref={dialogRef} className="dlg" role="alertdialog" aria-modal="true" aria-labelledby="dsm-purge-title" onClick={(e) => e.stopPropagation()}>
             <h3 id="dsm-purge-title" className="dlg-title">永久删除{purgeTarget === '__all' ? '全部回收站会话' : '这个会话'}？</h3>
-            <p className="dlg-text">此操作会物理删除日志，无法恢复。归档、筛选和重新安装插件都不能找回这些数据。</p>
+            <p className="dlg-text">此操作会物理删除日志并释放磁盘空间，无法恢复。归档、筛选和重新安装插件都不能找回这些数据。</p>
             <div className="dlg-actions">
               <button type="button" className="archv-btn" onClick={() => setPurgeTarget(null)}>取消</button>
               <button type="button" className="archv-btn archv-del" onClick={() => { const target = purgeTarget; setPurgeTarget(null); target === '__all' ? purgeAllTrash() : purgeTrash(target) }}>确认永久删除</button>
@@ -1193,40 +1208,90 @@ async function dsmLoadCapabilities() {
   try { dsmCapabilities = await postJSON('/archived-sessions/capabilities', {}) } catch (e) { /* unknown stays safely unavailable */ }
   return dsmCapabilities
 }
-function dsmActionCapability(name) {
-  return dsmCapabilities && dsmCapabilities.actions && dsmCapabilities.actions[name]
+function dsmActionCapability(name, legacy) {
+  const source = dsmCapabilities && dsmCapabilities.actions
+  return source ? (source[name] || (legacy && source[legacy]) || null) : null
 }
 async function dsmLoadTrashIds() {
   try {
     const r = await postJSON('/archived-sessions/sidebar-state', {})
     dsmTrashIds = new Set(((r && r.trashedSessionIds) || []).map(String))
     dsmServerPurgedIds = new Set(((r && r.purgedSessionIds) || []).map(String))
+    // 服务器已确认的乐观标记随即清除；未被确认的标记最多存活到下次刷新，
+    // 绝不永久压住后来同 id 的新会话。
+    for (const id of [...dsmPendingPurged]) {
+      if (dsmServerPurgedIds.has(id)) dsmPendingPurged.delete(id)
+    }
     dsmAuthoritativeTitles = new Map(Object.entries((r && r.titles) || {}).map(([id, title]) => [String(id), String(title)]))
     if (dsmRepaintDots) dsmRepaintDots()
   } catch (e) { /* keep last known set */ }
   return dsmTrashIds
 }
 
-// Permanently-hidden set: sessions the user hard-purged from the 回收站. Unlike
-// dsmTrashIds (which the backend poll refreshes and can drop), these are GONE for
-// good, so we keep them hidden forever — otherwise DSH re-surfaces the orphan
-// under a "未分组" group after the trash poll drops it from dsmTrashIds.
-const DSM_KEY_PURGED = 'dsm-purged-v1'
-let dsmPurgedIds = null
+// Permanently-hidden set: sessions the user hard-purged from the 回收站. The
+// SERVER is the single source of truth: sidebar-state only reports tombstones
+// whose ids are NOT currently present, so a same-id session recreated later is
+// unhidden automatically (the tombstone must never permanently suppress a new
+// session). dsmPendingPurged only carries this tab's optimistic marks until
+// the next server fetch acks them — no localStorage persistence, so a stale
+// tombstone can never outlive its server record. (dsmServerPurgedIds is
+// declared with the trash-state group above.)
+const dsmPendingPurged = new Set()
 function dsmLoadPurged() {
-  if (!dsmPurgedIds) {
-    try { dsmPurgedIds = new Set(JSON.parse(localStorage.getItem(DSM_KEY_PURGED) || '[]')) } catch (e) { dsmPurgedIds = new Set() }
-  }
-  dsmServerPurgedIds.forEach((id) => dsmPurgedIds.add(id))
-  return dsmPurgedIds
+  return new Set([...dsmServerPurgedIds, ...dsmPendingPurged])
 }
-function dsmSavePurged() { try { localStorage.setItem(DSM_KEY_PURGED, JSON.stringify([...dsmLoadPurged()])) } catch (e) {} }
 function dsmMarkPurged(ids) {
-  const s = dsmLoadPurged()
-  ids.forEach((id) => s.add(String(id)))
-  dsmSavePurged()
+  ids.forEach((id) => dsmPendingPurged.add(String(id)))
   if (dsmRepaintDots) dsmRepaintDots()
 }
+
+// ---- Sidebar injection adapter (versioned, safe-degrading) ----------------
+// 每一处脆弱的 DOM / React fiber 识别都收敛到这个 adapter：识别规则集中、
+// 可版本化（上游改版时 bump version 并只改这里），并且**可安全降级**——
+// 识别连续落空说明上游内部结构变了，此时 adapter 自动停用全部注入，
+// 绝不把半残行为强加到官方侧栏上（拖拽 / 标题同步 / 状态圆点一并停用）。
+const SIDEBAR_ADAPTER_VERSION = 3
+const SIDEBAR_ADAPTER_MAX_MISSES = 200
+
+function createSidebarAdapter() {
+  let disabled = false
+  let misses = 0
+  const findFiber = (el) => {
+    const k = Object.keys(el).find((kk) => kk.startsWith('__reactFiber') || kk.startsWith('__reactInternalInstance'))
+    return k ? el[k] : null
+  }
+  // 识别一行侧栏树节点：返回 { node, group }（会话行 / 工作区标题行）。
+  // 两种都没有 = 识别落空，累计到阈值即整体停用。
+  const recognize = (row) => {
+    const out = { node: null, group: null }
+    if (disabled || !row || typeof row !== 'object') return out
+    let f = findFiber(row)
+    let guard = 0
+    while (f && guard++ < 300) {
+      const props = f.memoizedProps
+      if (props && props.node && typeof props.node === 'object') out.node = props.node
+      // DSH 的会话行接收 `node`，工作区标题行（ProjectRowItem）接收 `group`。
+      if (props && props.group && typeof props.group === 'object') out.group = props.group
+      f = f.return
+    }
+    if (!out.node && !out.group) {
+      if (++misses >= SIDEBAR_ADAPTER_MAX_MISSES) {
+        disabled = true
+        try { console.warn('[dsh-sessions-manager] 侧栏注入 adapter v' + SIDEBAR_ADAPTER_VERSION + ' 已停用：未识别到已知的 DSH 侧栏节点结构（上游可能已改版）') } catch (e) {}
+      }
+    } else if (misses > 0) {
+      misses = 0
+    }
+    return out
+  }
+  return {
+    version: SIDEBAR_ADAPTER_VERSION,
+    get disabled() { return disabled },
+    findFiber,
+    recognize,
+  }
+}
+const sidebarAdapter = createSidebarAdapter()
 
 function installSidebarSessionMenuAug() {
   if (typeof document === 'undefined') return
@@ -1235,14 +1300,13 @@ function installSidebarSessionMenuAug() {
   let activeSubClose = null
   let hoverTimer = null
 
-  const findFiber = (el) => {
-    const k = Object.keys(el).find((kk) => kk.startsWith('__reactFiber') || kk.startsWith('__reactInternalInstance'))
-    return k ? el[k] : null
-  }
   // Walk the React fiber chain from the portalled menu element up to the
   // SessionNodeItem component, which carries `node.id` (the session id).
+  // Portalled menus are one-off surfaces: fiber walking here does NOT count
+  // toward the row adapter's miss budget (a non-session menu is normal, not a
+  // sign of upstream drift).
   const sessionInfoFromMenu = (menuEl) => {
-    let f = findFiber(menuEl)
+    let f = sidebarAdapter.findFiber(menuEl)
     let guard = 0
     while (f && guard++ < 300) {
       const p = f.memoizedProps
@@ -1412,7 +1476,7 @@ function installSidebarSessionMenuAug() {
     const move = mk('移动会话', ICON_MOVE, false)
     const del = mk('删除会话', ICON_DEL, true)
     const mark = mk(dsmLoadManual().has(info.id) ? '标记已读' : '标记未读', ICON_UNREAD, false)
-    const moveCapability = dsmActionCapability('move')
+    const moveCapability = dsmActionCapability('relocateSession') || dsmActionCapability('move')
     if (!moveCapability || !moveCapability.available) {
       move.btn.disabled = true
       move.btn.title = (moveCapability && moveCapability.reason) || '正在检查当前版本的移动能力'
@@ -1450,6 +1514,7 @@ function installSidebarSessionMenuAug() {
 
   const seen = new WeakSet()
   const obs = new MutationObserver(() => {
+    if (sidebarAdapter.disabled) return
     const menus = document.querySelectorAll('body > [role="menu"]')
     menus.forEach((menuEl) => {
       if (seen.has(menuEl)) return
@@ -1480,21 +1545,7 @@ function installSidebarStatusDots() {
     s.textContent = SIDEBAR_AUG_CSS
     document.head.appendChild(s)
   }
-  const findFiber = (el) => {
-    const k = Object.keys(el).find((kk) => kk.startsWith('__reactFiber') || kk.startsWith('__reactInternalInstance'))
-    return k ? el[k] : null
-  }
-  const fiberProp = (el, pred) => {
-    let f = findFiber(el)
-    let g = 0
-    while (f && g++ < 300) {
-      const p = f.memoizedProps
-      if (p && pred(p)) return pred(p)
-      f = f.return
-    }
-    return null
-  }
-  const rowNode = (row) => fiberProp(row, (p) => (p.node && typeof p.node.id === 'string' && p.node.id ? p.node : null))
+  const rowNode = (row) => sidebarAdapter.recognize(row).node
   const rowId = (row) => { const node = rowNode(row); return node ? node.id : null }
   let curActive = null
   const activeRowId = () => {
@@ -1518,9 +1569,10 @@ function installSidebarStatusDots() {
   const manualUnread = dsmLoadManual()
   const titleInitializedRows = new WeakSet()
   const paint = () => {
+    if (sidebarAdapter.disabled) return
     // Recompute the active session on every paint so the active row is never
     // shown from a stale `curActive` (the click that changes aria-selected
-    // mutates the DOM and triggers paint immediately, before the 1.2s tick()
+    // mutates the DOM and triggers paint immediately, before the tick()
     // would have run — without this, the clicked session flashed green).
     const activeId = activeRowId()
     // Clicking into a manually-marked session auto-clears the manual unread
@@ -1591,15 +1643,29 @@ function installSidebarStatusDots() {
     })
   }
   dsmRepaintDots = paint
-  const tick = () => { if (++dsmTrashTick % 8 === 0) dsmLoadTrashIds(); paint() }
+  // MutationObserver 增量驱动为主（childList + 属性 + 文本），彻底替代高频率
+  // 全表定时扫描；保留一个低频兜底 tick 处理无 DOM 变化的状态迁移，且后台
+  // 标签页完全不跑。回收站/墓碑集合的刷新也挂在这个兜底上（每 8 拍 ≈ 32s）。
   let raf = 0
   const schedulePaint = () => { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; paint() }) }
+  const FALLBACK_TICK_MS = 4000
+  const tick = () => {
+    if (typeof document !== 'undefined' && document.hidden) return
+    if (++dsmTrashTick % 8 === 0) dsmLoadTrashIds()
+    paint()
+  }
   tick()
   dsmLoadTrashIds()
   paint()
   const obs = new MutationObserver(schedulePaint)
-  obs.observe(document.body, { childList: true, subtree: true })
-  setInterval(tick, 1200)
+  obs.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['data-state', 'aria-selected', 'class', 'style'],
+    characterData: true,
+  })
+  setInterval(tick, FALLBACK_TICK_MS)
 }
 
 // Cross-workspace drag/drop for the native DSH sidebar. DSH does not expose a
@@ -1612,31 +1678,18 @@ function installSidebarWorkspaceDrag() {
   let dragging = null
   let moving = false
 
-  const findFiber = (el) => {
-    const key = Object.keys(el).find((k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'))
-    return key ? el[key] : null
+  // 识别统一走 sidebarAdapter（可版本化、可整体降级）；adapter 停用后拖拽
+  // 行为整体退出，不残留在官方侧栏上。
+  const sessionForRow = (row) => {
+    const { node, group } = sidebarAdapter.recognize(row)
+    return sessionForNodes(group ? [node, group].filter(Boolean) : [node], sessions)
   }
-  const fiberNodes = (el) => {
-    const out = []
-    let fiber = findFiber(el)
-    let guard = 0
-    while (fiber && guard++ < 300) {
-      const props = fiber.memoizedProps
-      if (props && props.node && typeof props.node === 'object') out.push(props.node)
-      // DSH's SessionNodeItem receives `node`, while ProjectRowItem (the
-      // workspace heading) receives `group`. Without the latter every session
-      // can start dragging but no workspace can ever become a valid drop zone.
-      if (props && props.group && typeof props.group === 'object') out.push(props.group)
-      fiber = fiber.return
-    }
-    return out
-  }
-  const sessionForRow = (row) => sessionForNodes(fiberNodes(row), sessions)
   const workspaceForRow = (row) => {
     // A session row's fiber chain also contains its parent workspace node.
     // Reject it explicitly so only the visible workspace header is a drop zone.
     if (sessionForRow(row)) return null
-    return workspaceForNodes(fiberNodes(row))
+    const { group } = sidebarAdapter.recognize(row)
+    return group ? workspaceForNodes([group]) : null
   }
   const eventRow = (event) => {
     for (const item of event.composedPath ? event.composedPath() : []) {
@@ -1656,6 +1709,7 @@ function installSidebarWorkspaceDrag() {
     document.querySelectorAll('.dsm-drag-source,.dsm-drop-target').forEach((el) => el.classList.remove('dsm-drag-source', 'dsm-drop-target'))
   }
   const decorateRows = () => {
+    if (sidebarAdapter.disabled) return
     document.querySelectorAll('[role="treeitem"]').forEach((row) => {
       const session = sessionForRow(row)
       const ws = workspaceForRow(row)
@@ -1688,7 +1742,8 @@ function installSidebarWorkspaceDrag() {
   }, true)
 
   document.addEventListener('dragstart', (event) => {
-    const moveCapability = dsmActionCapability('move')
+    if (sidebarAdapter.disabled) return
+    const moveCapability = dsmActionCapability('relocateSession') || dsmActionCapability('move')
     if (!moveCapability || !moveCapability.available) return
     const row = eventRow(event)
     const item = row && sessionForRow(row)

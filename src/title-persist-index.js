@@ -26,6 +26,10 @@ const MAX_ENTRIES = 20000
 
 // 条目只保留可序列化且对列表有用的字段；指纹缺失的条目无法校验，直接丢弃——
 // 宁可下次重解码，也不能把无法失效的数据当真。
+// ⚠️ revision 指纹（"rev:…"）只在当前 service 实例内有意义（官方 0.1.3 契约：
+// opaque token, same instance + same session id），绝不能落盘作为跨进程指纹——
+// 这里作为最后防线再次拦截（调用方 session-meta-cache.isPersistableFingerprint
+// 已先行过滤）。
 export function normalizeEntry(raw) {
   if (!raw || typeof raw !== 'object') return null
   const title = typeof raw.title === 'string' ? raw.title : null
@@ -33,7 +37,8 @@ export function normalizeEntry(raw) {
   const createdAt = typeof raw.createdAt === 'number' ? raw.createdAt : null
   const fingerprint = typeof raw.fingerprint === 'string' && raw.fingerprint ? raw.fingerprint : null
   const updatedAt = typeof raw.updatedAt === 'number' ? raw.updatedAt : 0
-  if (!fingerprint || (!title && !cwd)) return null
+  if (!fingerprint || fingerprint.startsWith('rev:')) return null
+  if (!title && !cwd) return null
   return { title, cwd, createdAt, fingerprint, updatedAt }
 }
 

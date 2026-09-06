@@ -75,6 +75,83 @@ export function summarizeToolArguments(name, rawArguments) {
   return JSON.stringify(rest).slice(0, MAX_TOOL_ARG)
 }
 
+// Shared event fold. `out` accumulates markdown lines; both the one-shot
+// renderer and the streaming builder (large-log export, see export-md route)
+// consume it so their output is byte-identical for the same events.
+function createMarkdownFold(out, header, options) {
+  const includeReasoning = options.includeReasoning === true
+  const includeToolResults = options.includeToolResults === true
+  let title = typeof header.title === 'string' && header.title.trim() ? header.title.trim() : null
+  let turn = null
+  return {
+    get title() { return title },
+    // The last session/title event wins — DSH may retitle a session later on.
+    add(events) {
+      const list = Array.isArray(events) ? events : []
+      for (const ev of list) {
+        if (!ev || typeof ev !== 'object') continue
+        const data = ev.data && typeof ev.data === 'object' ? ev.data : {}
+        const type = ev.type
+
+        if (type === 'session/title' && data && typeof data.title === 'string' && data.title.trim()) {
+          title = data.title.trim()
+          continue
+        }
+
+        if (type === 'turn/start') {
+          const next = Number.isInteger(data.turn) ? data.turn : null
+          if (next !== null && next !== turn) {
+            turn = next
+            out.push('', `## 第 ${turn} 轮`)
+          }
+          continue
+        }
+
+        if (type === 'user/message') {
+          const blocks = blocksOf(data.content)
+          const text = textFromBlocks(blocks)
+          const images = imageCountOf(blocks)
+          if (!text && images === 0) continue
+          out.push('', '### 用户', '')
+          if (text) out.push(text)
+          for (let i = 0; i < images; i++) out.push('', `![图片 ${i + 1}](attachment)`)
+          continue
+        }
+
+        if (type === 'assistant/message') {
+          const message = data.message && typeof data.message === 'object' ? data.message : {}
+          const blocks = blocksOf(message.content)
+          const text = textFromBlocks(blocks)
+          const reasoning = includeReasoning ? reasoningFromBlocks(blocks) : ''
+          if (!text && !reasoning) continue
+          out.push('', '### 助手', '')
+          if (reasoning) out.push('> 思考：' + reasoning.split('\n').join('\n> '), '')
+          if (text) out.push(text)
+          continue
+        }
+
+        if (type === 'tool/call') {
+          const name = typeof data.name === 'string' && data.name ? data.name : 'tool'
+          const summary = summarizeToolArguments(name, data.arguments)
+          out.push('', `### 工具调用：\`${name}\``, '')
+          out.push(summary ? '```\n' + summary + '\n```' : '（无参数）')
+          continue
+        }
+
+        if (type === 'tool/result' && includeToolResults) {
+          const message = data.message && typeof data.message === 'object' ? data.message : {}
+          const blocks = blocksOf(message.content)
+          let text = ''
+          for (const block of blocks) {
+            if (block.type === 'tool-result') text = textFromBlocks(blocksOf(block.content))
+          }
+          if (text) out.push('', '<details><summary>工具结果</summary>', '', '```\n' + text.slice(0, 2000) + '\n```', '', '</details>')
+        }
+      }
+    },
+  }
+}
+
 /**
  * Render one session as Markdown.
  * @param {object} meta - Session header (`{ id, cwd, createdAt, title? }`).
@@ -86,19 +163,12 @@ export function summarizeToolArguments(name, rawArguments) {
  * @returns {string} Markdown document.
  */
 export function renderSessionMarkdown(meta, events, options = {}) {
-  const includeReasoning = options.includeReasoning === true
-  const includeToolResults = options.includeToolResults === true
   const header = meta && typeof meta === 'object' ? meta : {}
-  const list = Array.isArray(events) ? events : []
+  const out = []
 
-  // The last session/title event wins — DSH may retitle a session later on.
-  let title = typeof header.title === 'string' && header.title.trim() ? header.title.trim() : null
-  for (const ev of list) {
-    const data = ev && ev.data
-    if (ev && ev.type === 'session/title' && data && typeof data.title === 'string' && data.title.trim()) {
-      title = data.title.trim()
-    }
-  }
+  const fold = createMarkdownFold(out, header, options)
+  fold.add(events)
+  const title = fold.title
 
   const front = ['---']
   if (title) front.push(`title: ${yamlString(title)}`)
@@ -110,66 +180,47 @@ export function renderSessionMarkdown(meta, events, options = {}) {
   if (exported) front.push(`exportedAt: ${exported}`)
   front.push('---')
 
-  const out = [front.join('\n')]
-  if (title) out.push('', `# ${title}`)
+  const doc = [front.join('\n')]
+  if (title) doc.push('', `# ${title}`)
+  doc.push(...out, '')
+  return doc.join('\n')
+}
 
-  let turn = null
-  for (const ev of list) {
-    if (!ev || typeof ev !== 'object') continue
-    const data = ev.data && typeof ev.data === 'object' ? ev.data : {}
-    const type = ev.type
-
-    if (type === 'turn/start') {
-      const next = Number.isInteger(data.turn) ? data.turn : null
-      if (next !== null && next !== turn) {
-        turn = next
-        out.push('', `## 第 ${turn} 轮`)
-      }
-      continue
-    }
-
-    if (type === 'user/message') {
-      const blocks = blocksOf(data.content)
-      const text = textFromBlocks(blocks)
-      const images = imageCountOf(blocks)
-      if (!text && images === 0) continue
-      out.push('', '### 用户', '')
-      if (text) out.push(text)
-      for (let i = 0; i < images; i++) out.push('', `![图片 ${i + 1}](attachment)`)
-      continue
-    }
-
-    if (type === 'assistant/message') {
-      const message = data.message && typeof data.message === 'object' ? data.message : {}
-      const blocks = blocksOf(message.content)
-      const text = textFromBlocks(blocks)
-      const reasoning = includeReasoning ? reasoningFromBlocks(blocks) : ''
-      if (!text && !reasoning) continue
-      out.push('', '### 助手', '')
-      if (reasoning) out.push('> 思考：' + reasoning.split('\n').join('\n> '), '')
-      if (text) out.push(text)
-      continue
-    }
-
-    if (type === 'tool/call') {
-      const name = typeof data.name === 'string' && data.name ? data.name : 'tool'
-      const summary = summarizeToolArguments(name, data.arguments)
-      out.push('', `### 工具调用：\`${name}\``, '')
-      out.push(summary ? '```\n' + summary + '\n```' : '（无参数）')
-      continue
-    }
-
-    if (type === 'tool/result' && includeToolResults) {
-      const message = data.message && typeof data.message === 'object' ? data.message : {}
-      const blocks = blocksOf(message.content)
-      let text = ''
-      for (const block of blocks) {
-        if (block.type === 'tool-result') text = textFromBlocks(blocksOf(block.content))
-      }
-      if (text) out.push('', '<details><summary>工具结果</summary>', '', '```\n' + text.slice(0, 2000) + '\n```', '', '</details>')
-    }
+/**
+ * Streaming variant of {@link renderSessionMarkdown} for chunked log reads
+ * (SessionHandle.read offset/length). Feed event batches in log order via
+ * `addEvents`; call `finish()` to get the same markdown document the one-shot
+ * renderer would produce. Only the final title (last session/title event)
+ * lands in the front matter, so streaming cannot be wrong about it.
+ *
+ * `finish(metaOverride)` — when the caller streams first and only learns the
+ * authoritative header afterwards (adapter inspectSession returns `meta` with
+ * the summary), pass it here; it replaces the constructor `meta` for the front
+ * matter fields (id / cwd / createdAt). Title always comes from the folded
+ * events, never from the override.
+ */
+export function createSessionMarkdownBuilder(meta, options = {}) {
+  const header = meta && typeof meta === 'object' ? meta : {}
+  const body = []
+  const fold = createMarkdownFold(body, header, options)
+  return {
+    addEvents(events) { fold.add(events) },
+    finish(metaOverride) {
+      const effective = metaOverride && typeof metaOverride === 'object' ? metaOverride : header
+      const title = fold.title
+      const front = ['---']
+      if (title) front.push(`title: ${yamlString(title)}`)
+      if (typeof effective.id === 'string' && effective.id) front.push(`sessionId: ${yamlString(effective.id)}`)
+      if (typeof effective.cwd === 'string' && effective.cwd) front.push(`cwd: ${yamlString(effective.cwd)}`)
+      const created = isoTime(effective.createdAt)
+      if (created) front.push(`createdAt: ${created}`)
+      const exported = isoTime(options.exportedAt)
+      if (exported) front.push(`exportedAt: ${exported}`)
+      front.push('---')
+      const doc = [front.join('\n')]
+      if (title) doc.push('', `# ${title}`)
+      doc.push(...body, '')
+      return doc.join('\n')
+    },
   }
-
-  out.push('')
-  return out.join('\n')
 }
