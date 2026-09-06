@@ -12,7 +12,7 @@
 
 > DSH session manager: archive, move, restore, and inspect sessions from **Settings → 会话管理**; mark unread, move, and delete sessions directly from the **main sidebar**. Deleted sessions go to the recycle bin first and can be restored or permanently purged.
 
-A persistent DSH plugin (host + browser halves) covering both the **settings panel** and the **main sidebar**, so frequent session actions don't require opening Settings. It understands both legacy header lists/`readFrom` and the new snapshot/`SessionHandle` API, enabling actions according to the current Runtime's verified capabilities. Unverified purge or migration paths are disabled in both UI and Host to prevent false success.
+A persistent DSH plugin (host + browser halves) covering both the **settings panel** and the **main sidebar**, so frequent session actions don't require opening Settings. It understands both legacy header lists/`readFrom` and the new snapshot/`SessionHandle` API, enabling actions according to the current Runtime's verified capabilities. Purge and migration paths are enabled only when they can be verified — on newer runtimes they are backed by guarded path derivation and write-ownership probes; anything unverifiable is disabled in both UI and Host to prevent false success.
 
 ## Features
 
@@ -159,7 +159,7 @@ lib/client.js      pre-built client (ModuleLoader CJS handshake)
 - Works in both DSH Desktop and DSH web (same host + client halves).
 - Peer dependencies are listed in `package.json`; `react` and `@deepseek-ai/*` are provided by the DSH runtime.
 - `0.1.2-rc.1`: the existing read, archive, recycle-bin, permanent-purge, and cross-workspace move paths remain available.
-- `0.1.3-alpha.1`: snapshot lists and read-only `SessionHandle` flows are supported. Permanent purge and cross-workspace move are disabled when no verified safe path is available; other management functions continue to work. The panel shows the effective capabilities.
+- `0.1.3-alpha.1`: snapshot lists and chunked `SessionHandle` read flows are supported. Permanent purge and cross-workspace move are restored via guarded path derivation (see the behavior notes below); they degrade gracefully only when the storage root cannot be confirmed. The panel shows the effective capabilities.
 - Unverified future runtimes expose only capabilities the plugin can safely identify; method presence alone is not presented as behavioral compatibility.
 
 ### Behavior differences and degradations under `0.1.3-alpha.1`
