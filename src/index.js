@@ -630,9 +630,26 @@ export function apply(ctx) {
         const entries = await persistence.listEntries()
         const current = entries.find((entry) => entry.id === sid)
         locatedHeader = current ? current.header : null
-        const located = current && persistence.locate(current.header)
+        // locateVerified：legacy 走官方 locate；handle 时代官方收走了 locate，
+        // 改由三层守卫推导（root → 目录结构 → id 归属），失败返回 null。
+        // 比仅靠回收站条目里的 originalPath 更可靠：originalPath 过期或缺失时
+        // 仍能从当前存储布局重新推导。
+        const located = current ? await persistence.locateVerified(current.header) : null
         if (located && typeof located.path === 'string') target = located.path
       } catch (e) {}
+      // 幽灵记录兜底：会话不在 list 里（后端索引滞后/索引缺失）但日志仍在盘上。
+      // 用 statSession 拿官方 header，再走守卫推导，避免退化成「只删单文件」
+      // 或直接 409 拒绝。
+      if (!locatedHeader && typeof persistence.statSession === 'function') {
+        try {
+          const snap = await persistence.statSession(sid)
+          if (snap && snap.header) {
+            locatedHeader = snap.header
+            const located = await persistence.locateVerified(snap.header)
+            if (located && typeof located.path === 'string') target = located.path
+          }
+        } catch (e) {}
+      }
       if (!target && typeof entry.originalPath === 'string') target = entry.originalPath
       if (!target) {
         const error = new Error('无法确认该会话的物理日志位置，已停止永久删除')

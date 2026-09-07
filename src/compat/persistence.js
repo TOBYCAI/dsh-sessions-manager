@@ -13,6 +13,8 @@
 //     is an opaque change token valid ONLY within one service instance and one
 //     session id (see src/session-meta-cache.js).
 
+import { locateSessionArtifacts } from '../handle-era-paths.js'
+
 const DEFAULT_CHUNK = 400
 // 防御上限：一次 inspect 的分块循环绝不能无限自旋（后端 read 行为异常时快速失败）。
 const MAX_CHUNKS = 20000
