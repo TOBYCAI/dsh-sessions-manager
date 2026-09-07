@@ -214,6 +214,121 @@ try {
   check('purge succeeds after the writer closes', (await sp.stat(holdWriter.id)) === undefined && (await sp.stat(busyId)) !== undefined)
   void busyStat
 
+  // ---- ROUTE-level smoke: boot the FULL plugin and drive real web routes ---
+  // 背景：v3.5.2 的「彻底删除」路由曾因引用未定义变量在 0.1.3 上稳定崩溃，
+  // 而本脚本的 ops 直连冒烟全程绿灯——路由层回归与 ops 直连不可互替。
+  // 本节在真实 alpha.1 后端上以完整 apply() 启动插件，直接驱动
+  // /archived-sessions/move 与 /archived-sessions/trash/purge 路由。
+  {
+    process.env.DSH_SESSIONS_MANAGER_TRASH_DIR = await mkdtemp(join(tmpdir(), 'dsm-runtime-trash-'))
+    const { writeFile } = await import('node:fs/promises')
+    const { join: pjoin } = await import('node:path')
+
+    const routes = new Map()
+    const mkEntity = (dir) => ({
+      id: dir,
+      title: dir,
+      path: dir,
+      sessionIds: [],
+      async attachSession(id) { if (!this.sessionIds.includes(id)) this.sessionIds.push(id) },
+      async detachSession(id) { this.sessionIds = this.sessionIds.filter((x) => x !== id) },
+    })
+    const headers = new Map()
+    const sessionPaths = new Map()
+    const entities = new Map()
+    const regState = { archivedSessionIds: [] }
+    const hostCtx = {
+      workspaceRegistry: {
+        list: () => [...entities.values()],
+        state: regState,
+        archiveSession: async () => {},
+        create: async (path) => { if (!entities.has(path)) entities.set(path, mkEntity(path)); return entities.get(path) },
+        headers,
+        sessionPaths,
+        replaceHeaderIndex: async (entries) => { for (const h of entries) headers.set(h.id, h) },
+        rebuildEntities() {},
+      },
+      sessionPersistence: sp,
+      sessionQuery: {
+        readTitleSnapshots: async (ids) => ids.map((id) => ({ status: 'fulfilled', value: { session: { id }, title: { title: `Route ${id}` } } })),
+      },
+      storageDomain: { get: () => ({ global: { get: () => regState, set: async (next) => Object.assign(regState, next) } }) },
+      webServer: { register: (route) => { routes.set(route.path, route.handler); return () => {} } },
+      get: () => null,
+      effect: (fn) => fn(),
+    }
+    const pluginMod = await import('../src/index.js')
+    pluginMod.apply(hostCtx)
+
+    const callRoute = async (path, body) => {
+      const { Readable } = await import('node:stream')
+      const req = Readable.from([Buffer.from(JSON.stringify(body))])
+      let status = 200
+      let text = ''
+      const res = { writeHead: (value) => { status = value }, end: (value) => { text += value || '' } }
+      await routes.get(path)(req, res)
+      return { status, body: JSON.parse(text) }
+    }
+
+    // MOVE 路由：真实后端上官方 create+append 重放跨工作区迁移。
+    const mvHeader = {
+      id: `route-mv-${Date.now().toString(36)}`,
+      cwd: root,
+      createdAt: Date.now(),
+      version: 2,
+      isSeeded: false,
+      delegationDepth: 0,
+    }
+    const mvWrite = await sp.create(mvHeader)
+    await mvWrite.append(mkBatch(0, 2))
+    await mvWrite.flush()
+    await mvWrite.close()
+    const mvTarget = await (await import('node:fs/promises')).realpath(
+      await (async () => { const f = await import('node:fs/promises'); await f.mkdir(join(root, 'route-ws-b'), { recursive: true }); return join(root, 'route-ws-b') })(),
+    )
+    const mvRes = await callRoute('/archived-sessions/move', { sessionId: mvHeader.id, targetPath: mvTarget })
+    check('route /move: 200 + moved', mvRes.status === 200 && mvRes.body.moved === true, mvRes.body)
+    const mvStat = await sp.stat(mvHeader.id)
+    check('route /move: official stat carries the new cwd', !!mvStat && mvStat.header.cwd === mvTarget, mvStat && mvStat.header.cwd)
+    check('route /move: workspace registry redirected', sessionPaths.get(mvHeader.id) === mvTarget)
+    const mvReread = await adapter.readSession(mvHeader.id, 0)
+    check('route /move: events preserved byte-identically', mvReread.events.length === 3, mvReread.events.length)
+
+    // PURGE 路由：预置真实回收站索引 → 走完整路由 → 官方 stat 复核消失。
+    const purgeHeader = {
+      id: `route-purge-${Date.now().toString(36)}`,
+      cwd: root,
+      createdAt: Date.now(),
+      version: 2,
+      isSeeded: false,
+      delegationDepth: 0,
+    }
+    const purgeWrite = await sp.create(purgeHeader)
+    await purgeWrite.append(mkBatch(0, 1))
+    await purgeWrite.flush()
+    await purgeWrite.close()
+    const purgeStat = await sp.stat(purgeHeader.id)
+    const { locateSessionArtifacts } = await import('../src/handle-era-paths.js')
+    const purgeArtifacts = await locateSessionArtifacts(sp, purgeStat.header)
+    const trashIndex = pjoin(process.env.DSH_SESSIONS_MANAGER_TRASH_DIR, 'index.json')
+    await writeFile(trashIndex, JSON.stringify({
+      schemaVersion: 2,
+      settings: { retentionDays: 0 },
+      items: [{ sessionId: purgeHeader.id, title: 'Route purge', originalPath: purgeArtifacts.logPath, deletedAt: 1 }],
+      purgedSessionIds: [],
+    }))
+    const purgeRes = await callRoute('/archived-sessions/trash/purge', { sessionId: purgeHeader.id })
+    check('route /trash/purge: 200 + purged', purgeRes.status === 200 && purgeRes.body.purged === true, purgeRes.body)
+    check('route /trash/purge: official stat no longer sees the session', (await sp.stat(purgeHeader.id)) === undefined)
+    check('route /trash/purge: tombstone persisted + item removed', (async () => {
+      const { readFileSync } = await import('node:fs')
+      const store = JSON.parse(readFileSync(trashIndex, 'utf8'))
+      return store.purgedSessionIds.includes(purgeHeader.id) && store.items.length === 0
+    })())
+
+    await rm(process.env.DSH_SESSIONS_MANAGER_TRASH_DIR, { recursive: true, force: true }).catch(() => {})
+  }
+
   console.log('\ncompat-runtime smoke PASSED')
   for (const c of checks) console.log(`  ✔ ${c.name}${c.detail !== null ? ` — ${JSON.stringify(c.detail)}` : ''}`)
 } finally {

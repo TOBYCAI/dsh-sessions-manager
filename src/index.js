@@ -554,7 +554,9 @@ export function apply(ctx) {
     const entry = store.items.find((t) => String(t.sessionId) === sid)
     let originalPath = entry && typeof entry.originalPath === 'string' ? entry.originalPath : null
     if (!originalPath && header) {
-      const loc = persistence.locate(header)
+      // handle 时代官方收走了 locate，用守卫式推导（root → 目录结构 → id 归属）
+      // 代替：推导成功且文件在盘 = 真核验通过，而不是标注 unverified 放行。
+      const loc = await persistence.locateVerified(header).catch(() => null)
       if (loc && typeof loc.path === 'string') originalPath = loc.path
     }
     if (originalPath) {
