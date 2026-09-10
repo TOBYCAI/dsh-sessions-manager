@@ -67,7 +67,7 @@ test('locateSessionArtifacts degrades to null on every guard failure', async () 
 
 test('ensureNoActiveWriter translates ownership conflicts into a 409', async () => {
   const owned = { async open() { const e = new Error('Session "x" is already owned by another writer'); e.name = 'SessionAlreadyOwnedError'; throw e } }
-  await assert.rejects(() => ensureNoActiveWriter(owned, 'x'), (e) => e.status === 409 && /正在进行中/.test(e.message))
+  await assert.rejects(() => ensureNoActiveWriter(owned, 'x'), (e) => e.status === 409 && e.code === 'DSM_SESSION_BUSY' && /正被 DSH 打开/.test(e.message))
   const ok = { async open() { return { async close() {} } } }
   await assert.doesNotReject(() => ensureNoActiveWriter(ok, 'x'))
   const other = { async open() { throw new Error('not found') } }
@@ -92,5 +92,5 @@ test('purge refuses an actively-writing session with 409', async () => {
     root,
     async open() { const e = new Error('already owned'); e.name = 'SessionAlreadyOwnedError'; throw e },
   }
-  await assert.rejects(() => purgeSessionArtifacts(sp, 'x', { id: 'x', cwd: '/w' }), (e) => e.status === 409 && /正在进行中/.test(e.message))
+  await assert.rejects(() => purgeSessionArtifacts(sp, 'x', { id: 'x', cwd: '/w' }), (e) => e.status === 409 && e.code === 'DSM_SESSION_BUSY' && /正被 DSH 打开/.test(e.message))
 })

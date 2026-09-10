@@ -208,3 +208,42 @@ test('rejects an invalid handle and closes what it got', async () => {
   await assert.rejects(adapter.inspectSession('x'), /无效的 SessionHandle/)
   assert.equal(closed, 1)
 })
+
+// 0.1.5 起 handle.read() 返回 { eventState, events }（不再是数组）。
+// 这里曾因"未知形态静默当空数组"导致读取恒为空：移动用空事件重建日志，
+// 把会话削成只剩头部的空壳（2026-09-10 实测两个会话被清空）。
+test('reads the 0.1.5 handle shape { eventState, events }', async () => {
+  const adapter = createPersistenceAdapter({
+    async list() { return [] },
+    async open(id) {
+      const batches = [
+        { eventState: 'shared-frozen', events: [{ seq: 0 }, { seq: 1 }] },
+        { eventState: 'shared-frozen', events: [] },
+      ]
+      let i = 0
+      return {
+        header: { id }, inheritedEventCount: 0,
+        async read() { return batches[i++] ?? { eventState: 'shared-frozen', events: [] } },
+        async close() {},
+      }
+    },
+  })
+  const result = await adapter.readSession('s1', 0)
+  assert.deepEqual(result.events.map((e) => e.seq), [0, 1])
+  // 分块 inspectSession 也必须折叠出事件
+  const seen = []
+  const summary = await adapter.inspectSession('s1', { onEvents: (batch) => { seen.push(...batch) } })
+  assert.equal(summary.eventCount, 2)
+  assert.deepEqual(seen.map((e) => e.seq), [0, 1])
+})
+
+test('an unknown read shape fails loudly instead of looking empty', async () => {
+  const adapter = createPersistenceAdapter({
+    async list() { return [] },
+    async open(id) {
+      // 既不是数组、也没有 events 数组：必须报错，绝不能静默当空
+      return { header: { id }, async read() { return { unexpected: true } }, async close() {} }
+    },
+  })
+  await assert.rejects(adapter.readSession('s1', 0), (e) => e.code === 'DSM_READ_SHAPE_UNKNOWN')
+})

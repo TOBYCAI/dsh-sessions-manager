@@ -25,6 +25,7 @@ before(async () => {
   // Every durable store this plugin owns is redirected to the temp dir — the
   // sweep and the star index must never touch the real ~/.dsh state.
   process.env.DSH_SESSIONS_MANAGER_TRASH_DIR = join(root, 'trash')
+  process.env.DSH_SESSIONS_MANAGER_PENDING_DIR = join(root, 'pending')
   process.env.DSH_SESSIONS_MANAGER_STAR_DIR = join(root, 'stars')
   process.env.DSH_SESSIONS_MANAGER_AUTO_ARCHIVE_DIR = join(root, 'aa')
   await mkdir(process.env.DSH_SESSIONS_MANAGER_TRASH_DIR, { recursive: true })

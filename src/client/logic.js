@@ -69,3 +69,82 @@ export function workspaceForNodes(nodes) {
 export function starredOf(items) {
   return (items || []).filter((item) => item && item.starred)
 }
+
+// 血缘折叠：把 origin === 'subagent' 的会话挂到父会话下，返回顶层列表 + 父子
+// 映射 + 折叠数量。
+//
+// 关键约束：从顶层移除的是「子代理自己」，父会话必须保留在顶层——折叠按钮就
+// 渲染在父会话卡片里，父一旦被一起过滤掉，界面上就只剩平铺的子代理，看起来
+// 像「折叠完全没生效」。
+// 父会话不在当前列表（被筛选掉 / 已删除）时子代理保持在顶层，保证搜得到就
+// 看得见。
+export function foldSubagents(items, lineage) {
+  const list = items || []
+  const table = lineage || {}
+  const kidsOf = new Map()
+  const foldedIds = new Set()
+  const byId = new Map()
+  for (const item of list) byId.set(String(item.sessionId), item)
+  for (const item of list) {
+    const id = String(item.sessionId)
+    const info = table[id]
+    const parentId = info && info.origin === 'subagent' && info.parentSession ? String(info.parentSession) : null
+    if (!parentId || parentId === id || !byId.has(parentId)) continue
+    if (!kidsOf.has(parentId)) kidsOf.set(parentId, [])
+    kidsOf.get(parentId).push(item)
+    foldedIds.add(id)
+  }
+  return {
+    topList: foldedIds.size ? list.filter((item) => !foldedIds.has(String(item.sessionId))) : list,
+    kidsOf,
+    foldedCount: foldedIds.size,
+  }
+}
+
+// 列表里只显示会话 ID 的短片段。完整 UUID 有 36 个字符，塞进 meta 行会把整
+// 行撑到换行、卡片高度跟着浮动——短 ID 是「列表定高」的前提之一。完整值保留
+// 在 title 属性与详情面板里，信息不丢。
+export function shortId(id) {
+  const raw = String(id == null ? '' : id)
+  const tail = raw.startsWith('session-') ? raw.slice(8) : raw
+  if (!tail) return ''
+  return tail.length <= 10 ? tail : tail.slice(0, 8) + '…'
+}
+
+// 打开子代理之后的提示文案。三种结果要传达三件不同的事，混成一句「打不开」
+// 会让人既不知道原因、也不知道下一步：
+//   ok         → 已经切过去了；在设置面板里会话区被挡着，得提醒关掉才看得到
+//   no-service → 这个 runtime 没开放会话切换接口，只能手动切
+//   failed     → 自动切换没成功，给出确定可走的替代路径（侧栏父会话头部的
+//                「/ N」官方子代理目录）
+// where: 'panel'（设置面板内）| 'sidebar'（侧栏注入行）
+export function openSubagentToast(result, name, where) {
+  const label = name || '子代理'
+  if (result === 'ok') {
+    return {
+      kind: 'ok',
+      text: where === 'sidebar' ? `已打开「${label}」` : `已打开「${label}」— 关掉设置即可看到`,
+    }
+  }
+  if (result === 'no-service') {
+    return { kind: 'err', text: '这个 DSH 版本没有开放会话切换接口，请在侧边栏手动切换' }
+  }
+  return {
+    kind: 'err',
+    text: where === 'sidebar'
+      ? '打不开这个子代理：请选中它的父会话，点标题栏的「/ N」子代理目录'
+      : '打不开：请在侧边栏选中它的父会话，点标题栏的「/ N」子代理目录',
+  }
+}
+
+// 提示（toast）停留时长：按**可读字数**给，而不是固定 2.4s / 2.6s。
+// 中文舒适阅读约 6 字/秒，留 40% 余量后夹在 [2.6s, 11s]；失败类再 ×1.25（同样受上限约束）。
+// 背景（2026-09-10 用户反馈）：排队/失败类文案动辄 40~100 字，"还没读完提示就不见了"。
+export const TOAST_MIN_MS = 2600
+export const TOAST_MAX_MS = 11000
+export function toastDurationFor(text, kind) {
+  const chars = String(text == null ? '' : text).length
+  const readingMs = Math.round((chars / 6) * 1000 * 1.4)
+  const scaled = kind === 'err' ? Math.round(readingMs * 1.25) : readingMs
+  return Math.min(TOAST_MAX_MS, Math.max(TOAST_MIN_MS, scaled))
+}

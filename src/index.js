@@ -7,13 +7,15 @@
 // (workspaceRegistry + storageDomain), folds titles/dates/workspace tags from
 // session persistence, physically removes a session's log file on delete, and
 // relocates a conversation (session) between workspaces on move.
-import { mkdir, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { rewriteFrame0CwdInMemory, scanZstdFrames } from './zstd-frame.js'
 import { createSessionMarkdownBuilder } from './markdown.js'
 import { createStarIndex } from './star-index.js'
+import { createPendingMoveStore } from './pending-moves.js'
+import { sweepStaleStateTemps } from './state-temp-sweep.js'
 import { aggregateStorage } from './storage-stats.js'
 import { createAutoArchiveStore, pickInactiveCandidates } from './auto-archive.js'
 import { createSessionMetaCache, fingerprintOf, isPersistableFingerprint } from './session-meta-cache.js'
@@ -22,12 +24,21 @@ import { createPersistenceAdapter } from './compat/persistence.js'
 import { detectCapabilities, requireCapability } from './compat/capabilities.js'
 import { pathOwnsSession } from './path-guard.js'
 import { purgeSessionArtifacts, moveSessionToCwd } from './handle-era-ops.js'
+import { classifyLineage, isEmptyEventTypes, EMPTY_DECODE_LIMIT } from './lineage.js'
+
+// 构建指纹：build.mjs 以 define 在编译期注入；直接以源码运行（测试）时为 'dev'。
+// 用途：capabilities 带出 buildStamp，一眼判断「运行中的 host 是不是这份构建」——
+// 插件 host 端只在宿主启动时加载一次，改完 lib 不重启宿主等于白改。
+const BUILD_STAMP = typeof __BUILD_STAMP__ !== 'undefined' ? __BUILD_STAMP__ : 'dev'
 
 
 export const name = 'dsh-sessions-manager'
 export const inject = ['webServer', 'workspaceRegistry', 'sessionPersistence', 'sessionQuery', 'storageDomain']
 
 const MAX_TITLE = 80
+// 插件自有状态目录（星标 / 自动归档 / 标题索引共用）。与 star-index.js、auto-archive.js
+// 的默认目录保持一致，环境变量同名，便于测试注入。
+const STATE_DIR = process.env.DSH_SESSIONS_MANAGER_STAR_DIR || join(homedir(), '.dsh', 'sessions-manager')
 // Recycle bin (回收站): normal deletes land here instead of being erased.
 const TRASH_DIR = process.env.DSH_SESSIONS_MANAGER_TRASH_DIR || join(homedir(), '.dsh', 'sessions-manager-trash')
 const TRASH_INDEX = join(TRASH_DIR, 'index.json')
@@ -177,11 +188,13 @@ export function apply(ctx) {
     return hits
   }
 
-  // 把本批真正解码出的元数据异步回写持久索引（fire-and-forget：索引只是
-  // 加速器，写失败不影响响应，队列内部已串行化 + 原子替换）。
+  // 把本批真正解码出的元数据回写持久索引（索引只是加速器：写失败不影响响应，
+  // 队列内部已串行化 + 原子替换）。**必须 await** —— 它是持久写入，浮动写入会在
+  // 调用方/测试 teardown 已开始清理状态目录时落地（`ENOTEMPTY: rmdir .../state`），
+  // 且"响应已返回但索引没落盘"时进程若恰好退出就会丢条目。
   // ⚠️ revision 指纹（SessionHandle 世代）绝不落盘：它只在当前 service
   // 实例内有意义，跨进程比较无意义，误用会把陈旧数据当新鲜数据。
-  function persistDecoded(decoded, statsById) {
+  async function persistDecoded(decoded, statsById) {
     if (!decoded || !decoded.size) return
     const batch = {}
     const now = Date.now()
@@ -191,7 +204,7 @@ export function apply(ctx) {
       batch[id] = { title: meta.title, cwd: meta.cwd, createdAt: meta.createdAt, fingerprint: fp, updatedAt: now }
     }
     if (!Object.keys(batch).length) return
-    titleIndex.merge(batch).catch(() => {})
+    try { await titleIndex.merge(batch) } catch (e) { /* 索引写失败不影响本次响应 */ }
   }
 
   // 从投影快照里抽出元数据；快照缺失/异常时返回零值 meta（调用方决定兜底）。
@@ -431,8 +444,14 @@ export function apply(ctx) {
   // when the session is really gone (purge, or externally removed; the latter
   // is caught by gcStars during list builds).
   const stars = createStarIndex()
+  // 待移动队列：会话被占用（DSH 打开中）时登记，等它释放后自动完成移动。
+  // 见 src/pending-moves.js 的模块注释（0.1.5 单写者锁没有公共释放 API）。
+  const pendingMoves = createPendingMoveStore()
   // Auto-archive settings live in their own schema-v4 store, off by default.
   const autoArchive = createAutoArchiveStore()
+  // 启动清扫：进程在「写临时文件 → rename」之间被杀会留下 .<name>-<pid>-<ts>.tmp
+  // 孤儿（实测一次累积 153 个）。这里把 1 小时前的旧临时文件收掉，不碰正在写的。
+  sweepStaleStateTemps([STATE_DIR, TRASH_DIR], {}).catch(() => {})
 
   async function gcStars(validIds) {
     try {
@@ -716,7 +735,11 @@ export function apply(ctx) {
       purged = true
     })
     if (!purged) throw new Error('彻底删除失败')
-    stars.removeIds([sid]).catch(() => {})
+    // 星标清理必须 await。原先这里是浮动写入（`stars.removeIds([sid]).catch(...)`）：
+    // 删除结果先返回、星标文件随后才落地，正好会撞上调用方（或测试 teardown）已开始的
+    // 状态目录清理 → `ENOTEMPTY: rmdir .../state`（全量测试里约 1/4 概率偶发失败）。
+    // 而且"删除成功"不该早于状态落盘：进程恰好在此刻退出就会留下指向已删会话的星标。
+    try { await stars.removeIds([sid]) } catch (e) { /* 星标清理失败不阻塞删除结果 */ }
     return { ok: true, purged: true }
   }
 
@@ -778,7 +801,10 @@ export function apply(ctx) {
     // crash-safe (backup + rollback) and re-syncs the live object.
     const activeId = getActiveSessionId(ctx)
     if (activeId != null && String(activeId) === String(sid)) {
-      throw new Error('该会话当前处于打开状态，请先切换到别的会话再移动。')
+      const error = new Error('会话正被 DSH 打开，暂时无法移动；请重启 DSH 后再试。')
+      error.status = 409
+      error.code = 'DSM_SESSION_BUSY'
+      throw error
     }
     const r = await persistence.readSession(sid, 0)
     if (!r || !r.meta) throw new Error('无法读取该会话的日志')
@@ -797,6 +823,10 @@ export function apply(ctx) {
     }
 
     const newHeader = Object.assign({}, meta, { cwd: canonical })
+
+  // 移动过程的非致命提示（如源目录仍有旧代日志未能清理），随成功结果一并
+  // 回报给客户端展示。
+  const moveNotes = []
 
     // 1) Decide relocation strategy. `sessionPersistence.create()` rejects
     // ("already exists in this backend") for ANY session the host has
@@ -850,6 +880,8 @@ export function apply(ctx) {
         await rename(stagedPath, newPath)
         destinationInstalled = true
         await unlink(backupPath)
+        const keptInSource = await cleanupMovedSourceDir(dirname(oldPath))
+        if (keptInSource.length > 0) moveNotes.push(`源目录未能清理干净（残留 ${keptInSource.join('、')}），若后续移动报“duplicate”请手动清空该目录。`)
       } catch (e) {
         try { await unlink(stagedPath) } catch (_) {}
         if (destinationInstalled) { try { await unlink(newPath) } catch (_) {} }
@@ -873,6 +905,17 @@ export function apply(ctx) {
       return null
     }
 
+    // 移动成功后的源目录收尾（legacy 路径）：**整体移除**。目标侧已写入校验通过的
+    // 权威日志，源目录只要还留着任何一代日志（legacy 旧代 session.jsonl.zstd 或
+    // session.vN.jsonl.zstd），就会让同 id 出现在两个项目目录，后端 list/create
+    // 立刻报 duplicate。返回未能清理时的残留文件名（供如实回报）。
+    const cleanupMovedSourceDir = async (dir) => {
+      let entries = null
+      try { entries = await readdir(dir) } catch (e) { return [] }
+      try { await rm(dir, { recursive: true, force: true }) } catch (e) { return entries }
+      return []
+    }
+
     // Rewriting frame0's cwd now lives in src/zstd-frame.js so it can be
     // regression-tested directly. See that module for why frame boundaries are
     // validated by decompression and why a non-session frame0 is rejected
@@ -890,7 +933,13 @@ export function apply(ctx) {
         }
       }
       try {
-        await moveSessionToCwd({ sp, sid, header: meta, canonical, events, inheritedEventCount: r.inheritedEventCount })
+        const movedHandle = await moveSessionToCwd({ sp, sid, header: meta, canonical, events, inheritedEventCount: r.inheritedEventCount })
+        if (movedHandle && Array.isArray(movedHandle.reclaimedSiblings) && movedHandle.reclaimedSiblings.length > 0) {
+          moveNotes.push(`已顺带回收 ${movedHandle.reclaimedSiblings.length} 处被取代的旧代日志副本（历史移动残留），避免同一会话在多目录重复。`)
+        }
+        if (movedHandle && movedHandle.sourceCleanup && movedHandle.sourceCleanup.cleaned === false) {
+          moveNotes.push(`源目录未能清理干净（残留 ${movedHandle.sourceCleanup.leftover.join('、')}），若后续移动报“duplicate”请手动清空该目录。`)
+        }
       } catch (e) {
         if (e && e.status) throw e
         throw new Error('移动会话日志失败：' + String((e && e.message) || e))
@@ -937,6 +986,10 @@ export function apply(ctx) {
             throw new Error('移动后校验失败：会话工作目录未正确更新')
           }
           if (backupPath) { try { await unlink(backupPath) } catch (e) {} }
+          if (oldPath) {
+            const keptInSource = await cleanupMovedSourceDir(dirname(oldPath))
+            if (keptInSource.length > 0) moveNotes.push(`源目录未能清理干净（残留 ${keptInSource.join('、')}），若后续移动报“duplicate”请手动清空该目录。`)
+          }
         } catch (e) {
           if (ALREADY_EXISTS_RE.test(String((e && e.message) || e))) {
             // Collision: the session is already materialized in states (archived
@@ -990,8 +1043,108 @@ export function apply(ctx) {
       workspaceId: target.id,
       workspaceTitle: target.title,
       workspacePath: canonical,
+      ...(moveNotes.length > 0 ? { notes: moveNotes } : {}),
     }
   }
+
+  // ---- 待移动队列（活跃 / 被占用的会话）-----------------------------------
+  // 0.1.5 的单写者锁由持有写句柄的进程掌控，插件既拿不到句柄也没有释放它的公共
+  // API；在占用期硬搬目录会让在写者继续写旧 inode 并在旧路径重建空壳。因此占用时
+  // 只登记排队，等宿主释放（session/disposed）或下次插件
+  // 启动时（会话尚未被打开）自动完成。
+  const QUEUE_NOTE = '已排队：该会话正被 DSH 打开（写所有权只在 DSH 退出时释放）。重启 DSH 时会自动完成，请先别打开它。'
+
+  function isBusyError(e) {
+    if (!e) return false
+    if (e.code === 'DSM_SESSION_BUSY') return true
+    const text = String((e && e.message) || e)
+    return /正被 DSH 打开|already owned/i.test(text)
+  }
+
+  // 移动入口：占用 → 排队；其它错误照旧抛出。返回成功结果或排队结果。
+  async function moveOrQueue(sid, targetPath) {
+    try {
+      return await moveOne(sid, targetPath)
+    } catch (e) {
+      if (!isBusyError(e)) throw e
+      await pendingMoves.queue(sid, targetPath)
+      return { ok: true, moved: false, queued: true, notes: [QUEUE_NOTE] }
+    }
+  }
+
+  // 启动后的「学步期」：这段时间内 moveOne 的非占用类失败只当环境未就绪，不计入
+  // 「多次失败即放弃」的计数（否则 boot 竞态会把用户的排队项白白丢掉）。
+  const BOOT_WARMUP_MS = 30000
+  const bootedAt = Date.now()
+
+  let queueRunning = false
+  async function runPendingMoves(reason) {
+    if (queueRunning) return { ran: false, moved: 0, kept: 0 }
+    queueRunning = true
+    let moved = 0
+    const notes = []
+    try {
+      const items = await pendingMoves.list()
+      for (const item of items) {
+        try {
+          await moveOne(item.sessionId, item.targetPath)
+          await pendingMoves.remove([item.sessionId])
+          metaCache.invalidate(item.sessionId)
+          moved++
+          notes.push(`排队中的移动已完成：${String(item.sessionId).slice(0, 18)}…`)
+        } catch (e) {
+          if (isBusyError(e)) continue // 仍被占用：留在队列里，等下一次触发
+          if (Date.now() - bootedAt < BOOT_WARMUP_MS) continue // boot 期未就绪：不记失败
+          const bumped = await pendingMoves.bumpAttempts(item.sessionId)
+          if (bumped && bumped.dropped) notes.push(`排队中的移动多次失败已放弃：${String(item.sessionId).slice(0, 18)}…（${String((e && e.message) || e)}）`)
+        }
+      }
+      if (moved > 0) { try { await reindexRegistry() } catch (e) { /* best-effort */ } }
+    } finally {
+      queueRunning = false
+    }
+    if (notes.length > 0) {
+      try { for (const n of notes) console.warn('[dsh-sessions-manager] ' + n) } catch (e) { /* ignore */ }
+    }
+    void reason
+    return { ran: true, moved, kept: (await pendingMoves.list()).length }
+  }
+
+  // 排队项的补跑时机。**关键前提**：0.1.5 的单写者所有权一经 open 就持有到**进程退出**
+  // 为止——官方没有任何「关闭会话 / 释放所有权」的公开入口（`dsh-commands` 只有
+  // compact/feedback/goal；宿主无 unloadSession/closeSession/evict），而浏览器一连上就会
+  // 自动打开/新建会话，一旦被打开就再也搬不动。所以唯一可靠窗口是**宿主刚起来、浏览器
+  // 还没连上**的那一两秒 ⇒ 启动后立刻试，并在前 30s 内密集重试；之后每 120s 兜底；
+  // 会话真被释放（session/disposed）时 500ms 后再试一次。
+  const queueEffect = typeof ctx.effect === 'function' ? ctx.effect.bind(ctx) : ((fn) => { fn() })
+  if (typeof ctx.on === 'function') {
+    queueEffect(() => ctx.on('session/disposed', (session) => {
+      const id = session && session.id != null ? String(session.id) : null
+      if (!id) return
+      pendingMoves.has(id).then((queued) => {
+        if (!queued) return
+        const t = setTimeout(() => { runPendingMoves('session-disposed').catch(() => {}) }, 500)
+        if (t && typeof t.unref === 'function') t.unref()
+      }).catch(() => {})
+    }))
+  }
+  queueEffect(() => {
+    // 每个启动补跑定时器都要 unref：宿主自己不会闲下来无所谓，但测试里未 unref 的
+    // 30s 定时器会让 node:test 多等 30s 才退出（整套测试被无谓拖长，实测见报告）。
+    const timers = [0, 1000, 3000, 6000, 12000, 30000].map((ms) => {
+      const t = setTimeout(() => {
+        runPendingMoves(ms === 0 ? 'startup' : `startup+${ms}`).catch(() => {})
+      }, ms)
+      if (t && typeof t.unref === 'function') t.unref()
+      return t
+    })
+    // 轻量周期重试：只在队列非空时干活（队列空 = 一次本地 JSON 读取）。
+    const tickTimer = setInterval(() => {
+      pendingMoves.list().then((items) => { if (items.length > 0) return runPendingMoves('tick') }).catch(() => {})
+    }, 120000)
+    if (tickTimer && typeof tickTimer.unref === 'function') tickTimer.unref()
+    return () => { for (const t of timers) clearTimeout(t); clearInterval(tickTimer) }
+  })
 
   // Force the host's WorkspaceRegistry to rebuild its in-memory sessionPath
   // index from the durable persistence headers. DSH's WorkspaceEntity.sessionIds
@@ -1119,7 +1272,7 @@ export function apply(ctx) {
       }))
       for (const it of res2) items.push({ ...it, archived: currentArchived.has(it.sessionId) })
     }
-    persistDecoded(decoded, statsById)
+    await persistDecoded(decoded, statsById)
     // Annotate stars; GC only when we have a trustworthy id baseline, so a
     // failing sp.list() can never wipe the whole index.
     let starredSet = new Set()
@@ -1237,12 +1390,75 @@ export function apply(ctx) {
         }
         if (meta && meta.title) authorityTitleCache.set(id, String(meta.title))
       }
-      persistDecoded(decoded, statsById)
+      await persistDecoded(decoded, statsById)
     }
+    // 血缘分类（issue #6）：结构分类（子代理 / fork 分支）来自 list snapshot
+    // 的 header，零解码；空白判定见下方 refineEmptyLineage（0.1.3 起体积法
+    // 失效，改为事件类型精判）。普通顶层非空会话不产生条目，payload 最小。
+    const lineage = {}
+    for (const entry of entries) {
+      const info = classifyLineage(entry.header, entry.sizeBytes)
+      if (info) lineage[entry.id] = info
+    }
+    await refineEmptyLineage(lineage, entries)
     return {
       titles: Object.fromEntries(authorityTitleCache),
       trashedSessionIds: store.items.map((item) => String(item.sessionId)),
       purgedSessionIds: activeTombstones,
+      lineage,
+    }
+  }
+
+  // 空会话判定缓存：id → { sizeBytes, empty }。日志没变（sizeBytes 相同）
+  // 就不重复解码——authority 会被侧栏高频轮询，缓存让它保持在近零成本。
+  const emptyScanCache = new Map()
+
+  // 0.1.3 空会话精判（事件类型法，见 lineage.js）：体积阈值对新格式失效
+  // （头部扩容 + 恒存生命周期帧），改为对「压缩体积 ≤ EMPTY_DECODE_LIMIT」
+  // 的候选走官方 inspectSession 解码，按事件类型判定。超过上限的日志必有
+  // 内容，直接跳过（维持体积法/结构分类的结果）。解码失败按「非空」处理：
+  // 宁可漏判一个空会话，不能把有内容的会话错标成空。
+  async function refineEmptyLineage(lineage, entries) {
+    if (!persistence || typeof persistence.inspectSession !== 'function') return
+    for (const entry of entries) {
+      const size = entry && Number.isFinite(entry.sizeBytes) ? entry.sizeBytes : null
+      if (size === null || size > EMPTY_DECODE_LIMIT) continue
+      const id = String(entry.id)
+      let scanned = emptyScanCache.get(id)
+      if (!scanned || scanned.sizeBytes !== size) {
+        let isEmpty = false
+        try {
+          const types = []
+          await persistence.inspectSession(id, { onEvents: (batch) => {
+            for (const ev of batch || []) if (types.length < 64) types.push(ev && ev.type)
+          } })
+          isEmpty = isEmptyEventTypes(types)
+        } catch (e) { isEmpty = false }
+        scanned = { sizeBytes: size, empty: isEmpty }
+        emptyScanCache.set(id, scanned)
+      }
+      if (scanned.empty) {
+        // 结构分类没建条目的普通会话也要补上（0.1.3 空会话 header 无血缘字段，
+        // classifyLineage 对它们返回 null）。
+        const info = lineage[id] || (lineage[id] = { origin: null, parentSession: null, delegationDepth: 0, empty: false })
+        info.empty = true
+      } else if (lineage[id]) {
+        // 旧体积法在小日志上的假阳性（如 alpha.2 单事件日志）在这里纠正；
+        // 纠正后若无任何血缘结构，条目整个撤掉，维持「普通会话不产生条目」。
+        const info = lineage[id]
+        info.empty = false
+        if (!info.origin && !info.parentSession) delete lineage[id]
+      }
+    }
+    // 缓存只保留「本轮仍参与判定」的会话：已彻底删除或日志膨胀超过解码
+    // 上限的条目不再有用，淘汰掉防止 Map 随历史会话无限增长。
+    const live = new Set()
+    for (const entry of entries) {
+      const size = entry && Number.isFinite(entry.sizeBytes) ? entry.sizeBytes : null
+      if (size !== null && size <= EMPTY_DECODE_LIMIT) live.add(String(entry.id))
+    }
+    for (const key of emptyScanCache.keys()) {
+      if (!live.has(key)) emptyScanCache.delete(key)
     }
   }
 
@@ -1393,7 +1609,7 @@ export function apply(ctx) {
     disposers.push(ctx.webServer.register({
       kind: 'exact',
       path: '/archived-sessions/capabilities',
-      handler: async (req, res) => json(res, capabilities),
+      handler: async (req, res) => json(res, { ...capabilities, buildStamp: BUILD_STAMP }),
     }))
 
     disposers.push(ctx.webServer.register({
@@ -1597,7 +1813,7 @@ export function apply(ctx) {
           const out = await purgeFromTrash(sid)
           metaCache.invalidate(sid)
           // 彻底删除：持久标题索引里的条目一并清掉（issue #1 P4）。
-          titleIndex.remove([sid]).catch(() => {})
+          try { await titleIndex.remove([sid]) } catch (e) { /* 索引清理失败不阻塞删除结果 */ }
           json(res, out)
         } catch (e) {
           json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
@@ -1615,7 +1831,7 @@ export function apply(ctx) {
           if (!ids || ids.length === 0) return json(res, { ok: false, error: 'missing sessionIds' }, 400)
           const results = []
           for (const sid of ids) {
-            try { results.push({ sessionId: sid, ok: true, ...(await purgeFromTrash(sid)) }); metaCache.invalidate(sid); titleIndex.remove([sid]).catch(() => {}) }
+            try { results.push({ sessionId: sid, ok: true, ...(await purgeFromTrash(sid)) }); metaCache.invalidate(sid); await titleIndex.remove([sid]).catch(() => {}) }
             catch (e) { results.push({ sessionId: sid, ok: false, error: String((e && e.message) || e) }) }
           }
           json(res, { ok: true, purged: results.filter((r) => r.ok).length, results })
@@ -1715,6 +1931,110 @@ export function apply(ctx) {
       },
     }))
 
+    // 子代理血缘树（管理视图数据面）：给定父会话，返回 origin==='subagent'
+    // 的递归子树。DSH 原生目录（ui-subagent）只读，这里补管理能力的数据来源。
+    // 只读官方 header 血缘字段（parentSession/origin/delegationDepth/createdAt），
+    // 标题走既有批量投影（readTitleSnapshots），零整本日志解码。
+    // live 标记 = 会话在内存里活着（正在运行或已打开）：批量清理必须跳过。
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/lineage-tree',
+      handler: async (req, res) => {
+        try {
+          const body = await readJsonBody(req)
+          const rootId = body && typeof body.sessionId === 'string' ? body.sessionId : ''
+          if (!rootId || !isSafeSessionId(rootId)) return json(res, { error: 'missing sessionId' }, 400)
+          const headerById = new Map()
+          const sizeById = new Map()
+          // 与会话列表同源的可见性判定：回收站项目一律不参与血缘树。
+          const trashedIds = new Set()
+          let purgedIds = []
+          const persistedIds = new Set()
+          try {
+            const store = await readTrashStore()
+            for (const item of store.items) trashedIds.add(String(item.sessionId))
+            purgedIds = store.purgedSessionIds.map(String)
+          } catch (e) { /* best-effort */ }
+          const addHeader = (h, sizeBytes) => {
+            if (!h || h.id == null) return
+            const id = String(h.id)
+            // 回收站里的会话（软删除后日志已搬走）不能出现在血缘树里，否则
+            // 会出现「删掉了侧栏还在」。彻底删除的墓碑在下面按「当前已不存在」
+            // 统一剔除，避免压住后来同 id 重建的会话。
+            if (headerById.has(id) || trashedIds.has(id)) return
+            headerById.set(id, {
+              parentSession: h.parentSession != null ? String(h.parentSession) : null,
+              subagent: h.origin === 'subagent',
+              delegationDepth: Number.isFinite(h.delegationDepth) ? h.delegationDepth : null,
+              createdAt: typeof h.createdAt === 'number' ? h.createdAt : null,
+            })
+            if (Number.isFinite(sizeBytes)) sizeById.set(id, sizeBytes)
+          }
+          try {
+            for (const entry of await persistence.listEntries()) {
+              addHeader(entry.header, entry.sizeBytes)
+              if (entry && entry.id != null) persistedIds.add(String(entry.id))
+            }
+          } catch (e) { /* best-effort */ }
+          const liveIds = new Set()
+          const live = ctx.get('sessions')
+          try {
+            if (live && typeof live.list === 'function') {
+              live.list().forEach((s) => { liveIds.add(String(s.id)); addHeader(s.header, undefined) })
+            }
+          } catch (e) { /* best-effort */ }
+          // 墓碑只对「持久层里确实没了」的 id 生效：同 id 会话后来重新出现时
+          // 必须让位，不能永久压住新会话（与会话列表同一套规则）。
+          for (const id of purgedIds) {
+            if (!persistedIds.has(id)) headerById.delete(id)
+          }
+          // 子代理索引：parentSession → 直接子代理 id 列表（只收 origin==='subagent'）。
+          const kidsOf = new Map()
+          for (const [id, h] of headerById) {
+            if (!h.subagent || !h.parentSession) continue
+            if (!kidsOf.has(h.parentSession)) kidsOf.set(h.parentSession, [])
+            kidsOf.get(h.parentSession).push(id)
+          }
+          // 递归展开：visited 防环，节点总数封顶防病态数据。
+          const MAX_NODES = 500
+          let nodeCount = 0
+          const build = (id, depth, visited) => {
+            nodeCount++
+            const h = headerById.get(id) || {}
+            const childVisited = new Set(visited)
+            childVisited.add(id)
+            const kidIds = nodeCount >= MAX_NODES ? [] : (kidsOf.get(id) || []).filter((k) => !childVisited.has(k))
+            return {
+              sessionId: id,
+              parentSession: h.parentSession || null,
+              delegationDepth: h.delegationDepth,
+              depth,
+              createdAt: h.createdAt || null,
+              sizeBytes: sizeById.has(id) ? sizeById.get(id) : null,
+              live: liveIds.has(id),
+              title: null,
+              children: kidIds.map((k) => build(k, depth + 1, childVisited)),
+            }
+          }
+          const nodes = (kidsOf.get(rootId) || []).map((k) => build(k, 1, new Set([rootId])))
+          const allIds = [rootId]
+          const walk = (n) => { allIds.push(n.sessionId); n.children.forEach(walk) }
+          nodes.forEach(walk)
+          const titles = await projectTitles(allIds)
+          const titleOf = (id) => {
+            const snap = titles.get(id)
+            const m = snap ? metaFromSnapshot(snap) : null
+            return (m && m.title) || null
+          }
+          const fill = (n) => { n.title = titleOf(n.sessionId); n.children.forEach(fill) }
+          nodes.forEach(fill)
+          json(res, { parent: { sessionId: rootId, title: titleOf(rootId) }, nodes })
+        } catch (e) {
+          json(res, { error: String((e && e.message) || e) }, errorStatus(e))
+        }
+      },
+    }))
+
     // Available target workspaces (for the move picker).
     disposers.push(ctx.webServer.register({
       kind: 'exact',
@@ -1739,7 +2059,8 @@ export function apply(ctx) {
           const target = body && typeof body.targetPath === 'string' ? body.targetPath : null
           if (!sid) return json(res, { ok: false, error: 'missing sessionId' }, 400)
           if (!target) return json(res, { ok: false, error: 'missing targetPath' }, 400)
-          const moved = await moveOne(sid, target)
+          const moved = await moveOrQueue(sid, target)
+          if (moved.queued) return json(res, { sessionId: sid, ...moved })
           // 移动会改写日志 frame0 的 cwd：元数据（cwd）已变，主动丢弃缓存条目，
           // 不等 mtime 指纹自然失效（Windows 上 mtime 精度较粗，指纹可能不变）。
           metaCache.invalidate(sid)
@@ -1752,6 +2073,77 @@ export function apply(ctx) {
           json(res, { sessionId: sid, ...moved })
         } catch (e) {
           json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
+        }
+      },
+    }))
+
+    // Move many conversations to one target workspace (issue #7). Sequential
+    // on purpose: each move rewrites frame0 (file IO), and one bad session
+    // must not block the rest. Single reindex at the end covers all moves.
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/move-many',
+      handler: async (req, res) => {
+        try {
+          const body = await readJsonBody(req)
+          const ids = Array.isArray(body && body.sessionIds)
+            ? [...new Set(body.sessionIds.filter((x) => typeof x === 'string' && x))]
+            : []
+          const target = body && typeof body.targetPath === 'string' ? body.targetPath : null
+          if (!ids.length) return json(res, { ok: false, error: 'missing sessionIds' }, 400)
+          if (!target) return json(res, { ok: false, error: 'missing targetPath' }, 400)
+          let moved = 0
+          const failed = []
+          const queued = []
+          for (const sid of ids) {
+            try {
+              const r = await moveOrQueue(sid, target)
+              if (r && r.queued) { queued.push(sid); continue }
+              // frame0 的 cwd 被改写：与单移动同理由，主动丢缓存不等指纹失效。
+              metaCache.invalidate(sid)
+              moved++
+            } catch (e) {
+              const err = e && e.code ? { sessionId: sid, error: String((e && e.message) || e), code: e.code } : { sessionId: sid, error: String((e && e.message) || e) }
+              failed.push(err)
+            }
+          }
+          try { await reindexRegistry() } catch (e) { /* best-effort */ }
+          json(res, {
+            moved,
+            failed,
+            ...(queued.length > 0 ? { queued, notes: [`${queued.length} 个会话已排队（正被 DSH 打开），重启 DSH 后会自动完成；重启后请先别打开它们。`] } : {}),
+          })
+        } catch (e) {
+          json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
+        }
+      },
+    }))
+
+    // 待移动队列：查看 / 取消（会话被占用时排队，释放后自动完成）。
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/pending-moves',
+      handler: async (req, res) => {
+        try {
+          const items = await pendingMoves.list()
+          json(res, { items: items.map((i) => ({ sessionId: i.sessionId, targetPath: i.targetPath, queuedAt: i.queuedAt, attempts: i.attempts })) })
+        } catch (e) {
+          json(res, { error: String((e && e.message) || e) }, 500)
+        }
+      },
+    }))
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/pending-moves/cancel',
+      handler: async (req, res) => {
+        try {
+          const body = await readJsonBody(req)
+          const ids = parseIds(body)
+          if (!ids || ids.length === 0) return json(res, { ok: false, error: 'missing sessionIds' }, 400)
+          const removed = await pendingMoves.remove(ids)
+          json(res, { ok: true, removed })
+        } catch (e) {
+          json(res, { ok: false, error: String((e && e.message) || e) }, errorStatus(e))
         }
       },
     }))

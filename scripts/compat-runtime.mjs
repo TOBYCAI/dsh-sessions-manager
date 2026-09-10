@@ -18,21 +18,39 @@
 // NOTE: the harness build tree contains native modules compiled for whatever
 // Node built it. If you hit NODE_MODULE_VERSION errors, rerun with the Node
 // version the checkout was built with (e.g. system node 26 for local builds).
+import { statSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
 
 const harnessDir = resolve(process.argv[2] || process.env.DSH_HARNESS_DIR || '')
 if (!harnessDir) {
-  console.error('usage: node scripts/compat-runtime.mjs <deepseek-harness-checkout>')
+  console.error('usage: node scripts/compat-runtime.mjs <deepseek-harness-checkout | ~/.dsh/runtime>')
   process.exit(2)
 }
 
-const pkgs = {
+// 两种布局都支持：
+//   1) 源码 checkout：<dir>/packages/session/session-persistence-jsonl
+//   2) 已安装 runtime：<dir>/node_modules/@deepseek-ai/dsh-session-persistence-jsonl
+// （runtime-src 会被 `dsm cleanup` 删掉，日常最方便的是直接指向 ~/.dsh/runtime）
+const existsSync = (p) => { try { statSync(p); return true } catch { return false } }
+let pkgs = {
   persistenceJsonl: join(harnessDir, 'packages/session/session-persistence-jsonl'),
   persistence: join(harnessDir, 'packages/session/session-persistence'),
+}
+if (!existsSync(pkgs.persistenceJsonl)) {
+  const nm = join(harnessDir, 'node_modules/@deepseek-ai')
+  if (existsSync(join(nm, 'dsh-session-persistence-jsonl'))) {
+    pkgs = {
+      persistenceJsonl: join(nm, 'dsh-session-persistence-jsonl'),
+      persistence: join(nm, 'dsh-session-persistence'),
+    }
+  } else {
+    console.error(`找不到官方后端：既没有 ${pkgs.persistenceJsonl}，也没有 ${join(nm, 'dsh-session-persistence-jsonl')}`)
+    process.exit(2)
+  }
 }
 const requireFrom = (dir) => createRequire(join(dir, 'package.json'))
 
@@ -70,14 +88,28 @@ try {
   check('service is the official SessionPersistence subclass', sp instanceof ServiceCtor, sp.name)
 
   // ---- synthetic session through the official write path -------------------
-  // Header must carry the full v2 vocabulary (version/isSeeded/delegationDepth):
-  // a sparse header materializes, but the backend's own header reader then
-  // classifies the frame as malformed and list()/stat() silently skip it.
+  // Header must carry the full current-format vocabulary (version/isSeeded/
+  // delegationDepth): a sparse header materializes, but the backend's own header
+  // reader then classifies the frame as malformed and list()/stat() silently skip it.
+  // **version 必须等于后端的当前格式版本**（0.1.2/0.1.3 = v2，0.1.5+ = v3），
+  // 否则 encodeCurrentHeader 直接抛 `encodeCurrent requires Session format vN`。
+  const formatUrl = pathToFileURL(join(
+    dirname(requireFrom(pkgs.persistenceJsonl).resolve('@deepseek-ai/dsh-session-format/package.json')),
+    'lib/index.js',
+  )).href
+  const formatMod = await import(formatUrl)
+  const CURRENT_FORMAT_VERSION = formatMod.sessionFormatCatalog?.currentVersion ?? 3
+  // handle.read() 的返回值形态随版本变化：0.1.3 是事件数组，0.1.5 是
+  // `{ eventState, events }`。这个 helper 同时充当形态回归断言——形态不认识就返回
+  // null，下面的 check 会立刻失败（2026-09-10 的读取恒空事故就属于这一类）。
+  const readEvents = (result) => Array.isArray(result)
+    ? result
+    : (result && Array.isArray(result.events) ? result.events : null)
   const header = {
     id: `smoke-${Date.now().toString(36)}`,
     cwd: root,
     createdAt: Date.now(),
-    version: 2,
+    version: CURRENT_FORMAT_VERSION,
     isSeeded: false,
     delegationDepth: 0,
   }
@@ -89,6 +121,8 @@ try {
     type: 'user/message',
     data: { id: `m-${i}`, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: `event-${i}` }] },
     seq: i,
+    time: Date.now(),
+    surfaceOp: 'append', // v3 surface 事件必需的顶层标记
   }))
   await write.append(batch)
   await write.flush()
@@ -110,11 +144,20 @@ try {
 
   // bounded reads through the official handle
   const rh = await sp.open(header.id, 'read')
-  const slice1 = await rh.read(0, 4)
-  const slice2 = await rh.read(4, 4)
-  const tail = await rh.read(8, 100)
-  const beyond = await rh.read(N, 4)
-  check('bounded read slices are contiguous', slice1.length === 4 && slice2.length === 4 && tail.length === 1 && beyond.length === 0, [slice1.length, slice2.length, tail.length, beyond.length])
+  const raw1 = await rh.read(0, 4)
+  const raw2 = await rh.read(4, 4)
+  const rawTail = await rh.read(8, 100)
+  const rawBeyond = await rh.read(N, 4)
+  const slice1 = readEvents(raw1)
+  const slice2 = readEvents(raw2)
+  const tail = readEvents(rawTail)
+  const beyond = readEvents(rawBeyond)
+  check('handle.read result shape is recognised (array or { events })',
+    slice1 !== null && slice2 !== null && tail !== null && beyond !== null,
+    { shape: Object.prototype.toString.call(raw1) })
+  check('bounded read slices are contiguous',
+    slice1.length === 4 && slice2.length === 4 && tail.length === 1 && beyond.length === 0,
+    [slice1.length, slice2.length, tail.length, beyond.length])
   await rh.close()
 
   // chunked inspection: single close, exact fold
@@ -149,6 +192,8 @@ try {
     type: 'user/message',
     data: { id: `m-${from + i}`, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: `event-${from + i}` }] },
     seq: from + i,
+    time: Date.now(),
+    surfaceOp: 'append', // v3 surface 事件必需的顶层标记
   }))
   const pathsMod = await import('../src/handle-era-paths.js')
   const opsMod = await import('../src/handle-era-ops.js')
@@ -156,7 +201,7 @@ try {
   // 路径推导必须命中真实落盘布局（root 实例字段 + projectKey/encodeSegment）。
   const currentStat = await sp.stat(header.id)
   const artifacts = await pathsMod.locateSessionArtifacts(sp, currentStat.header)
-  check('locateSessionArtifacts resolves the real session dir', !!artifacts && /session\.v2\.jsonl\.zstd$/.test(artifacts.logPath), artifacts && artifacts.logPath)
+  check('locateSessionArtifacts resolves the real session dir', !!artifacts && /session\.v\d+\.jsonl\.zstd$/.test(artifacts.logPath), artifacts && artifacts.logPath)
   check('locateSessionArtifacts rejects unknown sessions', await pathsMod.locateSessionArtifacts(sp, { id: 'no-such-id', cwd: root }) === null)
 
   // 关闭态会话：写所有权探测放行。
@@ -184,7 +229,7 @@ try {
   try {
     await opsMod.moveSessionToCwd({ sp, sid: busyId, header: busyHeader, canonical: join(root, 'project-c'), events: [] })
   } catch (e) {
-    busyRefused = e.status === 409 && /正在进行中/.test(e.message)
+    busyRefused = e.status === 409 && e.code === 'DSM_SESSION_BUSY'
   }
   await busyWriter.close()
   check('move refuses an actively-writing session with 409', busyRefused)
@@ -206,7 +251,7 @@ try {
   try {
     await opsMod.purgeSessionArtifacts(sp, holdWriter.id, (await sp.stat(holdWriter.id)).header)
   } catch (e) {
-    purgeRefused = e.status === 409 && /正在进行中/.test(e.message)
+    purgeRefused = e.status === 409 && e.code === 'DSM_SESSION_BUSY'
   }
   check('purge refuses a session with an open writer handle', purgeRefused)
   await holdWriter.close()
@@ -221,6 +266,8 @@ try {
   // /archived-sessions/move 与 /archived-sessions/trash/purge 路由。
   {
     process.env.DSH_SESSIONS_MANAGER_TRASH_DIR = await mkdtemp(join(tmpdir(), 'dsm-runtime-trash-'))
+  // 待移动队列也要落到临时目录，别写进真实的 ~/.dsh/sessions-manager。
+  process.env.DSH_SESSIONS_MANAGER_PENDING_DIR = await mkdtemp(join(tmpdir(), 'dsm-runtime-pending-'))
     const { writeFile } = await import('node:fs/promises')
     const { join: pjoin } = await import('node:path')
 
@@ -275,7 +322,7 @@ try {
       id: `route-mv-${Date.now().toString(36)}`,
       cwd: root,
       createdAt: Date.now(),
-      version: 2,
+      version: CURRENT_FORMAT_VERSION,
       isSeeded: false,
       delegationDepth: 0,
     }
@@ -299,7 +346,7 @@ try {
       id: `route-purge-${Date.now().toString(36)}`,
       cwd: root,
       createdAt: Date.now(),
-      version: 2,
+      version: CURRENT_FORMAT_VERSION,
       isSeeded: false,
       delegationDepth: 0,
     }

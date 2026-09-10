@@ -41,6 +41,8 @@ function buildCtx(routesMap) {
 before(async () => {
   root = await mkdtemp(join(tmpdir(), 'dsm-cache-'))
   process.env.DSH_SESSIONS_MANAGER_TRASH_DIR = join(root, 'trash')
+  process.env.DSH_SESSIONS_MANAGER_STAR_DIR = join(root, 'state')
+  process.env.DSH_SESSIONS_MANAGER_PENDING_DIR = join(root, 'pending')
   await mkdir(process.env.DSH_SESSIONS_MANAGER_TRASH_DIR, { recursive: true })
   const { apply } = await import(`../src/index.js?cache=${Date.now()}`)
   routes = new Map()

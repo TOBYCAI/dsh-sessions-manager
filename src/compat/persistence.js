@@ -19,10 +19,24 @@ const DEFAULT_CHUNK = 400
 // 防御上限：一次 inspect 的分块循环绝不能无限自旋（后端 read 行为异常时快速失败）。
 const MAX_CHUNKS = 20000
 
+// SessionHandle.read() 的返回值在 0.1.3 / 0.1.5 之间换过形态，这里统一成事件数组：
+//   - 0.1.3：直接是事件数组（或可迭代对象）
+//   - 0.1.5：**{ eventState: 'shared-frozen' | …, events: [...] }**（不再是数组！
+//     末尾读取同样是这个形状，只是 events: []）
+//   - 未知形态**抛错而不是当空数组**：静默返回 [] 的代价是灾难性的——
+//     2026-09-10 实测，0.1.5 升级后读取恒为空，移动"用空事件重建日志"把两个会话
+//     削成只剩头部的空壳。任何无法识别的返回值都必须让调用方看到错误。
 function normalizeReadResult(events) {
+  if (events === undefined || events === null) return []
   if (Array.isArray(events)) return events
-  if (events && typeof events[Symbol.iterator] === 'function') return [...events]
-  return []
+  if (typeof events === 'object' && Array.isArray(events.events)) return events.events
+  if (typeof events[Symbol.iterator] === 'function') return [...events]
+  const error = new Error(
+    'DSH 会话读取返回了无法识别的结构（runtime 接口可能已变更），已停止解析以免误判为空：' +
+    Object.prototype.toString.call(events),
+  )
+  error.code = 'DSM_READ_SHAPE_UNKNOWN'
+  throw error
 }
 
 async function closeQuietly(handle) {

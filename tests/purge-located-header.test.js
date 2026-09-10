@@ -22,6 +22,9 @@ before(async () => {
   root = await mkdtemp(join(tmpdir(), 'dsm-purge-'))
   trashDir = join(root, 'trash')
   process.env.DSH_SESSIONS_MANAGER_TRASH_DIR = trashDir
+  // 插件状态目录同样隔离，避免测试进程退出时打断原子写而漏下 .tmp
+  process.env.DSH_SESSIONS_MANAGER_STAR_DIR = join(root, 'state')
+  process.env.DSH_SESSIONS_MANAGER_PENDING_DIR = join(root, 'pending')
   await mkdir(trashDir, { recursive: true })
   const [{ apply }, { projectKeyFor, encodeSegmentFor }] = await Promise.all([
     import(`../src/index.js?purge=${Date.now()}`),

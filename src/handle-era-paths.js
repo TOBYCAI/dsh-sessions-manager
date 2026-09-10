@@ -26,7 +26,13 @@ import { readdir, stat } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { pathOwnsSession } from './path-guard.js'
 
-const GENERATION_LOG_RE = /^session\.v\d+\.jsonl(\.zst(d)?)?$/
+// 规范 generation 文件：官方 `session.vN.jsonl[.zstd]`，**v0 代无 `.vN.` 分量**
+// （即 `session.jsonl[.zstd]`，legacy 时代产物）。官方
+// `parseSessionFormatLogFilename` 把 v0 当 version 0 参与「最高代优先」，
+// 所以这里也必须收 v0，否则「只有 v0 代」的会话会被误判为不可定位
+// （移动/彻底删除静默禁用）。临时备份名（`.move-backup-…`）不以
+// `.jsonl`/`.zstd` 结尾，天然不匹配。
+const GENERATION_LOG_RE = /^session(\.v\d+)?\.jsonl(\.zst(d)?)?$/
 
 function isSafeChar(ch) {
   return ch !== '~' && /^[A-Za-z0-9._-]$/.test(ch)
@@ -80,8 +86,16 @@ export function deriveSessionDir(root, cwd, id) {
 }
 
 // 纯推导（不做磁盘校验）。供测试与上层组合使用。
-export function deriveGenerationLogPath(root, cwd, id, { compression = 'zstd' } = {}) {
-  return join(deriveSessionDir(root, cwd, id), `session.v2.jsonl${compression === 'zstd' ? '.zstd' : ''}`)
+// `generation` 只是名字里的 `.vN` 分量：0 = legacy 的 `session.jsonl`，2 = `session.v2.jsonl`。
+// 实际落盘版本由 runtime 的格式目录决定，此处不假设“当前版本是几”。
+export function deriveGenerationLogPath(root, cwd, id, { compression = 'zstd', generation = 2 } = {}) {
+  const base = generation === 0 ? 'session.jsonl' : `session.v${generation}.jsonl`
+  return join(deriveSessionDir(root, cwd, id), `${base}${compression === 'zstd' ? '.zstd' : ''}`)
+}
+
+// 名字里的代版本号（`session.v3.jsonl.zstd` → 3；`session.jsonl.zstd` → 0）。
+export function generationVersionOf(name) {
+  return Number((String(name).match(/^session\.v(\d+)\./) || [])[1] || 0)
 }
 
 // 定位一个已落盘会话的全部物理坐标；三层守卫在此汇合。返回
@@ -108,12 +122,8 @@ export async function locateSessionArtifacts(sp, header) {
   }
   const generationFiles = entries.filter((name) => GENERATION_LOG_RE.test(name))
   if (generationFiles.length === 0) return null
-  // 优先 current generation（v2 → 最高版本号），保持确定性。
-  generationFiles.sort((a, b) => {
-    const va = Number((a.match(/^session\.v(\d+)\./) || [])[1] || 0)
-    const vb = Number((b.match(/^session\.v(\d+)\./) || [])[1] || 0)
-    return vb - va
-  })
+  // 优先 current generation（v0/legacy 也是候选，版本号最小），保持确定性。
+  generationFiles.sort((a, b) => generationVersionOf(b) - generationVersionOf(a))
   const logPath = join(sessionDir, generationFiles[0])
   if (!pathOwnsSession(logPath, sid)) return null
   return {
@@ -122,5 +132,8 @@ export async function locateSessionArtifacts(sp, header) {
     sessionDir,
     logPath,
     generationFiles,
+    // 最高代版本号：0 = legacy `session.jsonl[.zstd]`，≥1 = `session.vN.jsonl[.zstd]`。
+    // 上层用它判断「另一个目录里的同 id 副本是不是被取代的旧代」。
+    generationVersion: generationVersionOf(generationFiles[0]),
   }
 }

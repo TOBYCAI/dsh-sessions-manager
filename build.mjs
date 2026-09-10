@@ -10,11 +10,16 @@
  * react / @deepseek-ai/dsh-* stay external and are provided by the app.
  */
 import { build } from 'esbuild'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 
 mkdirSync('lib', { recursive: true })
 
 const dshExternal = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-*']
+
+// 构建指纹：编译期注入。诊断「host 跑的是不是这份构建」用——插件 host 端只在
+// dsh web / DSH Desktop 启动时加载一次，改 lib 不重启等于白改，指纹一查便知。
+const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
+const buildStampDefine = { __BUILD_STAMP__: JSON.stringify(`${pkg.version} built ${new Date().toISOString()}`) }
 
 // ---- Host half: plain Node ESM -------------------------------------------
 await build({
@@ -26,6 +31,7 @@ await build({
   target: ['node22'],
   sourcemap: true,
   external: dshExternal,
+  define: buildStampDefine,
   logLevel: 'info',
 })
 
@@ -40,6 +46,7 @@ await build({
   sourcemap: true,
   jsx: 'automatic',
   external: [...dshExternal, 'react', 'react-dom', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'scheduler'],
+  define: buildStampDefine,
   banner: {
     js: "window.__ModuleLoader__.load({ id: 'dsh-sessions-manager', factory: (require) => { var module = { exports: {} }; var exports = module.exports;",
   },

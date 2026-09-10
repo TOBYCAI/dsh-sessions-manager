@@ -28,6 +28,8 @@ let events
 before(async () => {
   root = await mkdtemp(join(tmpdir(), 'dsm-handle-'))
   process.env.DSH_SESSIONS_MANAGER_TRASH_DIR = join(root, 'trash')
+  process.env.DSH_SESSIONS_MANAGER_STAR_DIR = join(root, 'state')
+  process.env.DSH_SESSIONS_MANAGER_PENDING_DIR = join(root, 'pending')
   await mkdir(process.env.DSH_SESSIONS_MANAGER_TRASH_DIR, { recursive: true })
   const { apply } = await import(`../src/index.js?handle=${Date.now()}`)
   routes = new Map()

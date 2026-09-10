@@ -36,7 +36,8 @@
     "test": "node --test tests/*.test.js",
     "check:dist": "npm run build && git diff --exit-code -- lib",
     "check:sessions": "node scripts/check-session-health.mjs",
-    "prepack": "node build.mjs"
+    "prepack": "node build.mjs",
+    "check:runtime": "node scripts/compat-runtime.mjs ${DSH_RUNTIME:-$HOME/.dsh/runtime}"
   },
   "devDependencies": {
     "esbuild": "^0.25.0"

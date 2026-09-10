@@ -17,6 +17,8 @@ let indexStale = false
 before(async () => {
   root = await mkdtemp(join(tmpdir(), 'dsm-test-'))
   process.env.DSH_SESSIONS_MANAGER_TRASH_DIR = join(root, 'trash')
+  process.env.DSH_SESSIONS_MANAGER_STAR_DIR = join(root, 'state')
+  process.env.DSH_SESSIONS_MANAGER_PENDING_DIR = join(root, 'pending')
   await mkdir(process.env.DSH_SESSIONS_MANAGER_TRASH_DIR, { recursive: true })
   await writeFile(join(process.env.DSH_SESSIONS_MANAGER_TRASH_DIR, 'index.json'), JSON.stringify([{ sessionId: 'legacy-1', title: 'Legacy', deletedAt: 1 }]))
   const { apply } = await import(`../src/index.js?test=${Date.now()}`)
