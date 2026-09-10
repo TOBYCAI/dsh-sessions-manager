@@ -154,7 +154,7 @@ lib/index.js       预构建 host（ESM）
 lib/client.js      预构建 client（ModuleLoader CJS handshake）
 ```
 
-`lib/` 已预构建，clone 下来即可直接用、无需 esbuild。若要改源码，运行 `npm i -D esbuild && npm run build` 重新生成 `lib/`。
+`lib/` 已预构建，clone 下来即可直接用、无需 esbuild。若要改源码，运行 `npm i -D esbuild && npm run build` 重新生成 `lib/`；提交前用 `npm run check:dist` 重建并与仓库产物比对（CI 跑同一道检查），**改版本号后务必一并重建**——构建指纹可复现为 `vX.Y.Z+源码哈希`，正是为了让这道比对精确可靠。
 
 ## Host 路由
 

@@ -154,7 +154,7 @@ lib/index.js       pre-built host (ESM)
 lib/client.js      pre-built client (ModuleLoader CJS handshake)
 ```
 
-`lib/` is pre-built, so cloning and using it needs no esbuild. To modify the source, run `npm i -D esbuild && npm run build` to regenerate `lib/`.
+`lib/` is pre-built, so cloning and using it needs no esbuild. To modify the source, run `npm i -D esbuild && npm run build` to regenerate `lib/`; before committing, `npm run check:dist` rebuilds and diffs `lib/` against the committed bundles (CI runs the same check), so **always rebuild after a version bump** — the build stamp is reproducible as `vX.Y.Z+source-hash`, which is what makes that comparison exact.
 
 ## Host routes
 
