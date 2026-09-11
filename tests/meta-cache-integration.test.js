@@ -123,7 +123,9 @@ async function waitForIndex(matchFingerprint = null) {
 test('list builds persist decoded metadata to the title index', async () => {
   const stored = await waitForIndex()
   assert.ok(stored, 'title-index.json must be written after a list build')
-  assert.equal(stored.schemaVersion, 1)
+  // v3.6.2：schema v2 —— 条目携带 resolved 标记；无标记的 null 标题条目在读取端
+  // 被当污染丢弃（title-persist-index.normalizeEntry / hydrateFromPersist）。
+  assert.equal(stored.schemaVersion, 2)
   assert.equal(stored.entries['cache-1'].title, 'Cached session')
   assert.equal(typeof stored.entries['cache-1'].fingerprint, 'string')
   if (touchedFingerprint) {

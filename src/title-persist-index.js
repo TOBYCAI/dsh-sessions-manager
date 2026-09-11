@@ -6,9 +6,12 @@
 // 一次索引读 + 指纹比对，指纹没变的会话零解码。
 //
 // 结构仿 trash 的原子写索引：{ schemaVersion, entries: { [sessionId]: entry } }
-// entry = { title, cwd, createdAt, fingerprint, updatedAt }
+// entry = { title, cwd, createdAt, fingerprint, updatedAt, resolved? }
 //   fingerprint 即 session-meta-cache.js 的 fingerprintOf(stat) 产出
 //   （"<mtimeMs>:<size>"），比对一致即可信任条目内容。
+//   resolved（schema v2，v3.6.2 #1）：标记「投影确实成功过」。title 为 null 的
+//   条目只有带这个标记才可信——没标记的 null 标题条目是 v3.6.1 之前「投影失败
+//   被当结果缓存」的污染源，读取时必须丢弃并重新预热。
 //
 // 写入时机由调用方决定（列表构建收尾批量回写、purge 时清理），本模块只
 // 提供：读取缓存、合并写入（串行化 + 原子替换）、按 id 删除。任何文件
@@ -20,7 +23,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
-export const TITLE_INDEX_SCHEMA_VERSION = 1
+export const TITLE_INDEX_SCHEMA_VERSION = 2
 
 const MAX_ENTRIES = 20000
 
@@ -37,9 +40,16 @@ export function normalizeEntry(raw) {
   const createdAt = typeof raw.createdAt === 'number' ? raw.createdAt : null
   const fingerprint = typeof raw.fingerprint === 'string' && raw.fingerprint ? raw.fingerprint : null
   const updatedAt = typeof raw.updatedAt === 'number' ? raw.updatedAt : 0
+  const resolved = raw.resolved === true || raw.resolved === 1
   if (!fingerprint || fingerprint.startsWith('rev:')) return null
   if (!title && !cwd) return null
-  return { title, cwd, createdAt, fingerprint, updatedAt }
+  // v3.6.2 #1：null 标题只有「投影确实成功过」（会话真的没有标题事件）才可信。
+  // 无 resolved 标记的 null 标题条目 = v3.6.1 的失败污染源（或 v1 旧数据），
+  // 一律丢弃 → 下次按未命中重新预热，索引自愈。
+  if (!title && !resolved) return null
+  const entry = { title, cwd, createdAt, fingerprint, updatedAt }
+  if (resolved) entry.resolved = 1
+  return entry
 }
 
 export function normalizeTitleIndex(raw) {

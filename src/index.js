@@ -18,7 +18,7 @@ import { createPendingMoveStore } from './pending-moves.js'
 import { sweepStaleStateTemps } from './state-temp-sweep.js'
 import { aggregateStorage } from './storage-stats.js'
 import { createAutoArchiveStore, pickInactiveCandidates } from './auto-archive.js'
-import { createSessionMetaCache, persistFingerprintOf } from './session-meta-cache.js'
+import { createSessionMetaCache, fingerprintOf, persistFingerprintOf } from './session-meta-cache.js'
 import { createTitleIndexStore } from './title-persist-index.js'
 import { createPersistenceAdapter } from './compat/persistence.js'
 import { detectCapabilities, requireCapability } from './compat/capabilities.js'
@@ -135,20 +135,8 @@ function getActiveSessionId(context) {
   return null
 }
 
-function foldTitle(events) {
-  let found = null
-  let firstUser = null
-  for (const ev of events) {
-    if (ev.type === 'session/title' && ev.data && typeof ev.data.title === 'string' && ev.data.title.length) {
-      found = ev.data.title
-    }
-    if (firstUser === null && ev.type === 'user/message' && ev.data && Array.isArray(ev.data.content)) {
-      const txt = ev.data.content.filter((b) => b && b.type === 'text').map((b) => b.text).filter(Boolean).join(' ').trim()
-      if (txt) firstUser = txt
-    }
-  }
-  return found || firstUser || null
-}
+// foldTitle（v3.6.1 删除路径的兜底折叠）随 v3.6.2 #7 的「删除路径零解码」一并
+// 移除；标题折叠逻辑的权威实现现在是 runtime 投影（src/index.js projectTitlesStatus）。
 
 export function apply(ctx) {
   const w = ctx.workspaceRegistry
@@ -184,7 +172,10 @@ export function apply(ctx) {
       // 从不落盘，导致每次重启都全量重新解码）。
       const fp = persistFingerprintOf(stat)
       if (!fp) continue
-      if (fp && entry.fingerprint === fp) {
+      // v3.6.2 #1：title 为 null 的条目必须是「投影确实成功过」（resolved）才可信。
+      // v3.6.1 把投影失败当结果落盘的污染条目（null 标题、无标记）在这里被丢弃，
+      // 调用方按未命中处理 → 重新入队预热，索引自愈。
+      if (entry.fingerprint === fp && (entry.title || entry.resolved)) {
         hits.set(id, { title: entry.title, cwd: entry.cwd, createdAt: entry.createdAt })
       }
     }
@@ -197,14 +188,18 @@ export function apply(ctx) {
   // 且"响应已返回但索引没落盘"时进程若恰好退出就会丢条目。
   // 指纹用 persistFingerprintOf：legacy 文件指纹 + handle 世代 sz(sizeBytes) 指纹
   // 都可跨重启；rev: 指纹仍被排除（实例内 opaque token，issue #8）。
+  // v3.6.2 #1：decoded 的值是 { meta, resolved } —— resolved=false（投影失败）
+  // 的条目绝不落盘；null 标题只有 resolved=true 才允许（否则读取端会当污染丢弃）。
   async function persistDecoded(decoded, statsById) {
     if (!decoded || !decoded.size) return
     const batch = {}
     const now = Date.now()
-    for (const [id, meta] of decoded) {
+    for (const [id, pack] of decoded) {
+      if (!pack || !pack.resolved) continue
+      const meta = pack.meta
       const fp = persistFingerprintOf(statsById.get(id))
       if (!fp) continue
-      batch[id] = { title: meta.title, cwd: meta.cwd, createdAt: meta.createdAt, fingerprint: fp, updatedAt: now }
+      batch[id] = { title: meta.title, cwd: meta.cwd, createdAt: meta.createdAt, fingerprint: fp, updatedAt: now, resolved: 1 }
     }
     if (!Object.keys(batch).length) return
     try { await titleIndex.merge(batch) } catch (e) { /* 索引写失败不影响本次响应 */ }
@@ -308,6 +303,73 @@ export function apply(ctx) {
   let warmRunning = false
   let warmKickTimer = null
 
+  // v3.6.2 #1：投影失败的三态处理（issue #8 审计）。旧实现把「投影失败」和
+  // 「会话真没标题」混为同一个 null → 失败被写进缓存/持久索引，跨重启固化成
+  // 永久占位且永不重试。现在：
+  //   - resolved（fulfilled，title 可以是 null = 事实无标题）→ 正常入缓存+落盘；
+  //   - failed（rejected / 批量异常 / 结果缺条）→ 不缓存、不落盘，按 id 计数退避。
+  // 退避：15s×2^n 递增，最多 WARM_MAX_ATTEMPTS 次；此后 parked 一小时后再探一次
+  // （坏日志长期停摆时不至于永久静默）。日志指纹任何变化都清零计数重新武装。
+  const WARM_MAX_ATTEMPTS = 5
+  const warmFail = new Map() // id → { count, fp, nextAt }
+
+  function warmFpOf(stat) {
+    return fingerprintOf(stat) || persistFingerprintOf(stat)
+  }
+
+  function warmBlocked(id, fp) {
+    const rec = warmFail.get(id)
+    if (!rec) return 0
+    if (fp && rec.fp && rec.fp !== fp) { warmFail.delete(id); return 0 } // 内容变了 → 重新武装
+    const now = Date.now()
+    return rec.nextAt > now ? rec.nextAt - now : 0
+  }
+
+  function warmMarkFailure(id, stat, header) {
+    const rec = warmFail.get(id) || { count: 0, fp: null, nextAt: 0 }
+    rec.count += 1
+    rec.fp = warmFpOf(stat) || rec.fp
+    // 退避到点后由 scheduleWarmRetry 原样重新入队（含本轮的 stat/header 快照）。
+    if (stat) rec.stat = stat
+    if (header) rec.header = header
+    const backoff = rec.count >= WARM_MAX_ATTEMPTS
+      ? 60 * 60 * 1000
+      : Math.min(5 * 60 * 1000, 15 * 1000 * Math.pow(2, rec.count))
+    rec.nextAt = Date.now() + backoff
+    warmFail.set(id, rec)
+  }
+
+  // 队列里还有「未放弃」的活 → 侧栏/面板应缩短轮询节拍（client 消费）。
+  function warmPendingNow() {
+    if (!warmHasApi) return false
+    if (warmRunning || warmQueue.size) return true
+    for (const rec of warmFail.values()) if (rec.nextAt > Date.now()) return true
+    return false
+  }
+
+  // 退避到点的条目由一个 unref 定时器重新入队（每轮只挂最近的一个）。
+  let warmRetryTimer = null
+  function scheduleWarmRetry() {
+    if (warmRetryTimer) return
+    let soonest = 0
+    for (const rec of warmFail.values()) {
+      const wait = rec.nextAt - Date.now()
+      if (wait <= 0) { soonest = 1; break }
+      if (!soonest || wait < soonest) soonest = wait
+    }
+    if (!soonest) return
+    warmRetryTimer = setTimeout(() => {
+      warmRetryTimer = null
+      // 到点的条目重新入队（enqueue 时会重新校验 blocked/fp）。
+      const now = Date.now()
+      for (const [id, rec] of warmFail) {
+        if (rec.nextAt <= now && !warmQueue.has(id)) warmQueue.set(id, { stat: rec.stat || null, header: rec.header || null })
+      }
+      if (warmQueue.size) scheduleWarm()
+    }, soonest)
+    if (typeof warmRetryTimer.unref === 'function') warmRetryTimer.unref()
+  }
+
   function scheduleWarm() {
     if (warmKickTimer || warmRunning) return
     warmKickTimer = setTimeout(() => { warmKickTimer = null; runWarm() }, 25)
@@ -317,15 +379,50 @@ export function apply(ctx) {
 
   function enqueueWarm(ids, statsById, entryById) {
     if (!ids || !ids.length) return
+    // 无投影 API 的 runtime：预热注定无果，不入队（占位行为退回「列表不带标题」
+    // 的诚实形态，而不是让退避定时器永远转下去）。
+    if (!warmHasApi) return
     for (const id of ids) {
       const key = String(id)
+      const stat = statsById ? (statsById.get(key) || null) : null
+      // #9：任何指纹都算不出来的会话（live 未落盘等）既进不了内存缓存也进不了
+      // 持久索引——投影结果注定无处安放，每轮轮询重复入队只是白烧 CPU（churn）。
+      // 跳过；这类行的标题由 DSH 自己的 live 渲染保证。
+      const fp = warmFpOf(stat)
+      if (!fp) continue
+      // #1：仍在失败退避窗口内的条目不重复入队（runWarm 会按 blocked 跳过）。
+      const blockedMs = warmBlocked(key, fp)
       const entry = entryById ? entryById.get(key) : null
+      const rec = warmFail.get(key)
+      if (rec) { rec.stat = stat || rec.stat; if (entry) rec.header = entry.header || rec.header }
+      if (blockedMs > 0) continue
       warmQueue.set(key, {
-        stat: statsById ? (statsById.get(key) || null) : null,
+        stat,
         header: (entry && entry.header) || null,
       })
     }
-    scheduleWarm()
+    if (warmQueue.size) scheduleWarm()
+    scheduleWarmRetry()
+  }
+
+  // #7：软删除时标题可能还没预热出来（回收站条目落一条 title:null 的诚实记录），
+  // 之后任何一轮 warm 解出该会话标题就补写进回收站索引——只补空标题，
+  // 绝不覆盖已有值。回收站渲染端（t.title || t.sessionId）随下次拉取自然更新。
+  async function backfillTrashTitles(decoded) {
+    if (!decoded || !decoded.size) return
+    try {
+      const items = await readTrash()
+      const worth = items.some((t) => !t.title && decoded.get(String(t.sessionId)) && decoded.get(String(t.sessionId)).meta && decoded.get(String(t.sessionId)).meta.title)
+      if (!worth) return
+      await mutateTrash((store) => {
+        for (const item of store.items) {
+          if (item.title) continue
+          const pack = decoded.get(String(item.sessionId))
+          const t = pack && pack.meta && pack.meta.title
+          if (t) item.title = String(t)
+        }
+      })
+    } catch (e) { /* 补写失败无害：索引只是加速器 */ }
   }
 
   async function runWarm() {
@@ -337,12 +434,18 @@ export function apply(ctx) {
         for (const [id] of batch) warmQueue.delete(id)
         try {
           const ids = batch.map(([id]) => id)
-          const snapshotById = await projectTitles(ids)
+          const resultById = await projectTitlesStatus(ids)
           const decoded = new Map()
           const statsById = new Map()
           for (const [id, desc] of batch) {
-            const snapshot = snapshotById.has(id) ? snapshotById.get(id) : null
-            const meta = metaFromSnapshot(snapshot)
+            const r = resultById.get(id)
+            if (!r || !r.resolved) {
+              // 投影失败：绝不写缓存/持久索引（否则失败被固化为永久占位）。
+              warmMarkFailure(id, desc.stat, desc.header)
+              continue
+            }
+            warmFail.delete(id)
+            const meta = metaFromSnapshot(r.snapshot || null)
             // cwd/createdAt 永远以最新 list header 为权威（投影的 session 头可能
             // 陈旧；移动会话后尤其如此），投影只负责标题。
             if (desc.header) {
@@ -351,9 +454,11 @@ export function apply(ctx) {
             }
             metaCache.set(id, desc.stat, meta)
             statsById.set(id, desc.stat)
-            if (desc.stat) decoded.set(id, meta)
+            decoded.set(id, { meta, resolved: true })
           }
           await persistDecoded(decoded, statsById)
+          // #7：回收站条目删除时可能没有标题（软删除只记录）；预热解出来后补写。
+          await backfillTrashTitles(decoded)
         } catch (e) { /* 单批失败不影响后续批次：索引/缓存只是加速器 */ }
         // 批间让步：保证宿主事件循环（RPC/心跳/其他插件）始终可调度。
         await new Promise((resolve) => setImmediate(resolve))
@@ -362,6 +467,7 @@ export function apply(ctx) {
       warmRunning = false
       // 预热期间又有新请求入队 → 再排一轮。
       if (warmQueue.size) scheduleWarm()
+      scheduleWarmRetry()
     }
   }
 
@@ -514,25 +620,21 @@ export function apply(ctx) {
         title = header.title || (header.meta && header.meta.title) || null
       }
       if (!title) {
-        // 标题兜底优先走单会话标题投影（快照级，不读日志）；投影也没有时才
-        // 分块解码日志折叠标题（inspectSession 分块，不整本驻留内存）。
-        if (typeof sq.readTitleSnapshot === 'function') {
-          try {
-            const snap = unwrapSnapshot(await sq.readTitleSnapshot(sid))
-            if (snap && snap.title && snap.title.title) title = String(snap.title.title)
-            if (snap && snap.session) { if (!cwd) cwd = snap.session.cwd || null }
-          } catch (e) { /* fall through */ }
-        }
-      }
-      if (!title) {
+        // v3.6.2 #7：删除路径**绝不**做标题投影/分块解码——issue #8 的教训：
+        // 大日志上单条兜底投影也是整本解压，删除 = 秒级卡宿主。只消费现成缓存：
+        // metaCache（用 list 快照算指纹）→ 持久索引 → 侧栏权威缓存。都没有就存
+        // null（诚实占位，不再把 cwd/裸 id 冒充标题永久写进回收站），
+        // 后台预热解出标题后由 backfillTrashTitles 补写。
         try {
-          let folded = null
-          const summary = await persistence.inspectSession(sid, {
-            onEvents: (events) => { if (!folded) folded = foldTitle(events) },
-          })
-          if (summary && summary.meta && !cwd) cwd = summary.meta.cwd || null
-          title = folded
+          const delStat = persistenceEntry && typeof persistenceEntry.revision === 'string' && persistenceEntry.revision
+            ? { revision: persistenceEntry.revision, sizeBytes: Number.isFinite(persistenceEntry.sizeBytes) ? Number(persistenceEntry.sizeBytes) : undefined }
+            : (removedPath ? await stat(removedPath).then((st) => ({ mtimeMs: st.mtimeMs, size: st.size })) : null)
+          if (delStat) {
+            const m = metaCache.get(sid, delStat) || (await hydrateFromPersist([sid], new Map([[sid, delStat]]))).get(sid)
+            if (m && m.title) title = String(m.title)
+          }
         } catch (e) { /* best-effort */ }
+        if (!title) { const at = authorityTitleCache.get(sid); if (at) title = String(at) }
       }
     } catch (e) { /* best-effort */ }
     // Record in the trash index only — the log stays in its workspace dir.
@@ -544,7 +646,9 @@ export function apply(ctx) {
     const archived = await mutateArchived((list) => ({ next: null, value: list.includes(sid) })).catch(() => false)
     await mutateTrash((store) => {
       const entry = {
-        sessionId: sid, title: title || cwd || sid, cwd: cwd || null,
+        // v3.6.2 #7：不再把 cwd/裸 id 冒充标题永久定格——存 null，预热解出后
+        // backfillTrashTitles 补写；渲染端（t.title || t.sessionId）自然降级。
+        sessionId: sid, title: title || null, cwd: cwd || null,
         header: header || null, originalPath: removedPath || null,
         sizeBytes: persistenceEntry && Number.isFinite(persistenceEntry.sizeBytes) ? persistenceEntry.sizeBytes : null,
         wasArchived: archived, deletedAt: Date.now(),
@@ -1210,23 +1314,52 @@ export function apply(ctx) {
     })
   }
 
-  // 批量投影：一次调用把多条会话的标题/header 拿出来，避免逐条触发整本解码。
-  // 老 runtime 没有 readTitleSnapshots 时返回空 Map，调用方自然回退到逐条投影
-  // （功能不受影响，只是少了这层优化——插件不能假设对方的 runtime 版本）。
-  async function projectTitles(ids) {
+  // 批量投影（v3.6.2 #1 三态版）。返回 Map<id, { resolved, snapshot|null }>：
+  //   resolved=true  —— fulfilled 快照（title 可能为 null：会话真的没标题，
+  //                     这是事实，可以缓存/落盘）；
+  //   resolved=false —— rejected / 批量异常 / 结果缺条 / 无投影 API。
+  // 调用方（runWarm）只缓存 resolved 的条目；失败的进退避重试，绝不落盘——
+  // 否则「一次失败」被固化为跨重启的永久占位（v3.6.1 审计 #1）。
+  const warmHasApi = typeof sq.readTitleSnapshots === 'function' || typeof sq.readTitleSnapshot === 'function'
+
+  async function projectTitlesStatus(ids) {
     const out = new Map()
+    const markAll = (resolved) => { for (const id of ids) out.set(String(id), { resolved, snapshot: null }) }
     if (!ids || !ids.length) return out
-    if (typeof sq.readTitleSnapshots !== 'function') return out
-    try {
-      const results = await sq.readTitleSnapshots(ids)
-      if (!Array.isArray(results)) return out
-      results.forEach((result, index) => {
-        const id = String(ids[index])
-        out.set(id, unwrapSnapshot(result))
-      })
-    } catch (e) { /* 批量失败：逐条回退 */ }
+    if (!warmHasApi) { markAll(false); return out }
+    if (typeof sq.readTitleSnapshots === 'function') {
+      let results = null
+      try { results = await sq.readTitleSnapshots(ids) } catch (e) { results = null }
+      if (Array.isArray(results)) {
+        results.forEach((result, index) => {
+          const id = String(ids[index])
+          if (result && result.status === 'fulfilled') out.set(id, { resolved: true, snapshot: unwrapSnapshot(result) })
+          else if (result && result.status === 'rejected') out.set(id, { resolved: false, snapshot: null })
+          else if (result) out.set(id, { resolved: true, snapshot: unwrapSnapshot(result) }) // 最老形态：直接是快照
+          else out.set(id, { resolved: false, snapshot: null })
+        })
+        // 结果数组短于请求（runtime 行为异常）→ 缺的条目按失败处理。
+        for (const id of ids) if (!out.has(String(id))) out.set(String(id), { resolved: false, snapshot: null })
+        return out
+      }
+      // 批量形态不认识：退回逐条。
+    }
+    if (typeof sq.readTitleSnapshot === 'function') {
+      for (const raw of ids) {
+        const id = String(raw)
+        try {
+          const r = await sq.readTitleSnapshot(id)
+          if (r && r.status === 'rejected') out.set(id, { resolved: false, snapshot: null })
+          else out.set(id, { resolved: true, snapshot: unwrapSnapshot(r) })
+        } catch (e) { out.set(id, { resolved: false, snapshot: null }) }
+      }
+      return out
+    }
+    markAll(false)
     return out
   }
+
+  // 兼容旧调用点（暂无）：保留名字不导出，避免误用回「失败即 null」的旧语义。
 
   // opts.usage: expose sizeBytes + updatedAt on each item (storage analysis and
   // the auto-archive sweep need them; the panel list does not).
@@ -1446,6 +1579,9 @@ export function apply(ctx) {
       trashedSessionIds: store.items.map((item) => String(item.sessionId)),
       purgedSessionIds: activeTombstones,
       lineage,
+      // v3.6.2：还有预热/退避重试在途 → client 缩短轮询节拍，预热一完成就把
+      // 补齐的标题送回（含面板自动刷新）。无预热 API 时恒 false，绝不假忙。
+      warmPending: warmPendingNow(),
     }
   }
 
@@ -1458,38 +1594,51 @@ export function apply(ctx) {
   // 的候选走官方 inspectSession 解码，按事件类型判定。超过上限的日志必有
   // 内容，直接跳过（维持体积法/结构分类的结果）。解码失败按「非空」处理：
   // 宁可漏判一个空会话，不能把有内容的会话错标成空。
+  // v3.6.2（分支标签延迟审计 #1 的速效半边）：旧实现把全部 ≤8KB 候选**串行**
+  // 解码在 sidebar-state 的请求路径里——冷启动（进程内缓存全空）时零解码成本
+  // 的血缘数据被这串慢解码挡在 return 之前，这正是「⑂ 分支」chip 晚出/32s 台阶
+  // 的直接门控。现在：并行限流 4 路 + 每请求预算 REFINE_BUDGET 条（超预算的
+  // 小日志下一拍继续，逐拍收敛；已缓存的条目零成本照常应用，不影响正确性）。
+  // 彻底解绑（精判挪进后台队列）是 3.7.0 的响应契约改造，不在热修范围。
+  const REFINE_BUDGET = 40
+  function applyEmptyScan(lineage, id, empty) {
+    if (empty) {
+      // 结构分类没建条目的普通会话也要补上（0.1.3 空会话 header 无血缘字段，
+      // classifyLineage 对它们返回 null）。
+      const info = lineage[id] || (lineage[id] = { origin: null, parentSession: null, delegationDepth: 0, empty: false })
+      info.empty = true
+    } else if (lineage[id]) {
+      // 旧体积法在小日志上的假阳性（如 alpha.2 单事件日志）在这里纠正；
+      // 纠正后若无任何血缘结构，条目整个撤掉，维持「普通会话不产生条目」。
+      const info = lineage[id]
+      info.empty = false
+      if (!info.origin && !info.parentSession) delete lineage[id]
+    }
+  }
   async function refineEmptyLineage(lineage, entries) {
     if (!persistence || typeof persistence.inspectSession !== 'function') return
+    const limiter = createLimiter(4)
+    const todo = []
     for (const entry of entries) {
       const size = entry && Number.isFinite(entry.sizeBytes) ? entry.sizeBytes : null
       if (size === null || size > EMPTY_DECODE_LIMIT) continue
       const id = String(entry.id)
-      let scanned = emptyScanCache.get(id)
-      if (!scanned || scanned.sizeBytes !== size) {
-        let isEmpty = false
-        try {
-          const types = []
-          await persistence.inspectSession(id, { onEvents: (batch) => {
-            for (const ev of batch || []) if (types.length < 64) types.push(ev && ev.type)
-          } })
-          isEmpty = isEmptyEventTypes(types)
-        } catch (e) { isEmpty = false }
-        scanned = { sizeBytes: size, empty: isEmpty }
-        emptyScanCache.set(id, scanned)
-      }
-      if (scanned.empty) {
-        // 结构分类没建条目的普通会话也要补上（0.1.3 空会话 header 无血缘字段，
-        // classifyLineage 对它们返回 null）。
-        const info = lineage[id] || (lineage[id] = { origin: null, parentSession: null, delegationDepth: 0, empty: false })
-        info.empty = true
-      } else if (lineage[id]) {
-        // 旧体积法在小日志上的假阳性（如 alpha.2 单事件日志）在这里纠正；
-        // 纠正后若无任何血缘结构，条目整个撤掉，维持「普通会话不产生条目」。
-        const info = lineage[id]
-        info.empty = false
-        if (!info.origin && !info.parentSession) delete lineage[id]
-      }
+      const scanned = emptyScanCache.get(id)
+      if (scanned && scanned.sizeBytes === size) { applyEmptyScan(lineage, id, scanned.empty); continue }
+      if (todo.length < REFINE_BUDGET) todo.push({ id, size })
     }
+    await Promise.all(todo.map(({ id, size }) => limiter(async () => {
+      let isEmpty = false
+      try {
+        const types = []
+        await persistence.inspectSession(id, { onEvents: (batch) => {
+          for (const ev of batch || []) if (types.length < 64) types.push(ev && ev.type)
+        } })
+        isEmpty = isEmptyEventTypes(types)
+      } catch (e) { isEmpty = false }
+      emptyScanCache.set(id, { sizeBytes: size, empty: isEmpty })
+      applyEmptyScan(lineage, id, isEmpty)
+    })))
     // 缓存只保留「本轮仍参与判定」的会话：已彻底删除或日志膨胀超过解码
     // 上限的条目不再有用，淘汰掉防止 Map 随历史会话无限增长。
     const live = new Set()
@@ -1888,7 +2037,7 @@ export function apply(ctx) {
       path: '/archived-sessions/sessions',
       handler: async (req, res) => {
         try {
-          json(res, { items: await allSessionItems() })
+          json(res, { items: await allSessionItems(), warmPending: warmPendingNow() })
         } catch (e) {
           json(res, { error: String((e && e.message) || e) }, 500)
         }
@@ -1975,7 +2124,8 @@ export function apply(ctx) {
     // 子代理血缘树（管理视图数据面）：给定父会话，返回 origin==='subagent'
     // 的递归子树。DSH 原生目录（ui-subagent）只读，这里补管理能力的数据来源。
     // 只读官方 header 血缘字段（parentSession/origin/delegationDepth/createdAt），
-    // 标题走既有批量投影（readTitleSnapshots），零整本日志解码。
+    // 标题走 v3.6.2 的纯缓存读取（metaCache/持久索引/权威缓存），未命中入后台
+    // 预热、本轮返回 null；请求路径零解码。
     // live 标记 = 会话在内存里活着（正在运行或已打开）：批量清理必须跳过。
     disposers.push(ctx.webServer.register({
       kind: 'exact',
@@ -2011,9 +2161,29 @@ export function apply(ctx) {
             })
             if (Number.isFinite(sizeBytes)) sizeById.set(id, sizeBytes)
           }
+          // v3.6.2 #4：标题只读缓存（metaCache → 持久索引 → 权威缓存），未命中
+          // 入后台预热、本轮返回 null。旧实现在请求路径直调 projectTitles——
+          // 展开一个 N 子树的父会话 = N 次整本解码同步在请求路径上（issue #8
+          // 要消灭的形态在本路由的残留）。这里顺手记下指纹与原始 header，供
+          // 缓存读取与 enqueueWarm 使用。
+          const lineageStats = new Map()
+          const lineageHeaders = new Map()
           try {
             for (const entry of await persistence.listEntries()) {
               addHeader(entry.header, entry.sizeBytes)
+              const eid = entry && entry.id != null ? String(entry.id) : null
+              if (eid) {
+                lineageHeaders.set(eid, { header: (entry && entry.header) || null })
+                // 只有 handle 世代（snapshot 带 revision）才建 stats；legacy 的列表快照
+                // 本就没有这些观测，其标题经 sidebarAuthority 的 authorityTitleCache
+                // 兜住。刻意不在这里合成 sz-only stat——会和列表构建的 mtime:size
+                // 指纹在同一索引里乒乓覆盖，引发交替重复解码。
+                if (entry && typeof entry.revision === 'string' && entry.revision) {
+                  lineageStats.set(eid, Number.isFinite(entry.sizeBytes)
+                    ? { revision: entry.revision, sizeBytes: Number(entry.sizeBytes) }
+                    : { revision: entry.revision })
+                }
+              }
               if (entry && entry.id != null) persistedIds.add(String(entry.id))
             }
           } catch (e) { /* best-effort */ }
@@ -2061,11 +2231,19 @@ export function apply(ctx) {
           const allIds = [rootId]
           const walk = (n) => { allIds.push(n.sessionId); n.children.forEach(walk) }
           nodes.forEach(walk)
-          const titles = await projectTitles(allIds)
+          // v3.6.2 #4：缓存读取 + 预热入队，请求路径零解码。#12：标题按
+          // MAX_TITLE 截断，与列表输出口径一致。
+          const lineageIds = allIds.map(String)
+          const { cached: lineageCached, missing: lineageMissing } = metaCache.partition(lineageIds, lineageStats)
+          const lineagePersisted = await hydrateFromPersist(lineageMissing, lineageStats)
+          for (const [id, meta] of lineagePersisted) metaCache.set(id, lineageStats.get(id), meta)
+          const lineageRest = lineageMissing.filter((id) => !lineagePersisted.has(id))
+          if (lineageRest.length) enqueueWarm(lineageRest, lineageStats, lineageHeaders)
+          const truncateTitle = (t) => (t ? (t.length > MAX_TITLE ? t.slice(0, MAX_TITLE) + '…' : t) : null)
           const titleOf = (id) => {
-            const snap = titles.get(id)
-            const m = snap ? metaFromSnapshot(snap) : null
-            return (m && m.title) || null
+            const key = String(id)
+            const m = lineageCached.get(key) || lineagePersisted.get(key)
+            return truncateTitle((m && m.title) || authorityTitleCache.get(key) || null)
           }
           const fill = (n) => { n.title = titleOf(n.sessionId); n.children.forEach(fill) }
           nodes.forEach(fill)

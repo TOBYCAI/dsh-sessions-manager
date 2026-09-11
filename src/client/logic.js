@@ -30,6 +30,35 @@ export function authoritativeTitleForFirstPaint({ firstPaint = false, rendered =
   return authoritative
 }
 
+// v3.6.2 #2：占位/冷标题的行在权威标题**后到**时回填。返回 null 表示不动 DOM。
+// 所有权规则（与首绘一致，绝不覆盖 DSH Core 的实时更新）：
+//   - 首次见到该行 → 有权威就用权威（changed 仅在权威≠当前文本时为 true）；
+//   - 之后：当前文本仍等于我们上次记录/写入的值（baseline.text）且权威更新 →
+//     回填新权威；当前文本被官方改过 → 只重新记录所有权，绝不写。
+export function titleBackfillDecision({ rendered = '', baseline = null, authoritative = '' } = {}) {
+  const auth = authoritative || ''
+  if (!baseline) {
+    const next = auth || rendered
+    return { text: next, changed: !!auth && auth !== rendered, nextBaseline: { text: next, authoritative: auth || null } }
+  }
+  if (rendered !== baseline.text) {
+    // 文本已被（官方渲染或用户重命名）改动：所有权移交，仅重新记录。
+    return { changed: false, nextBaseline: { text: rendered, authoritative: baseline.authoritative || null } }
+  }
+  if (!auth || auth === baseline.authoritative) return null
+  return { text: auth, changed: true, nextBaseline: { text: auth, authoritative: auth } }
+}
+
+// v3.6.2 #6：列表搜索/标题排序的「有效标题」= 列表项标题，缺时回落到侧栏
+// 权威标题缓存（预热补齐后即使面板还没刷新，搜索/排序也按真标题工作）。
+export function effectiveTitleOf(item, authoritativeTitles) {
+  if (!item) return ''
+  if (item.title) return String(item.title)
+  const id = String(item.sessionId)
+  const auth = authoritativeTitles && authoritativeTitles.get(id)
+  return auth ? String(auth) : ''
+}
+
 // 拖拽迁移前置校验：同工作区拦截（workspacePath 相等即拒绝）。
 // 无 workspacePath 的会话（如侧栏 live 行尚未同步）放行，由 host 最终裁决。
 export function canDropOnWorkspace(item, target) {

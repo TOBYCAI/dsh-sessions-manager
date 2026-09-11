@@ -11,7 +11,7 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { authoritativeTitleForFirstPaint, canDropOnWorkspace, dotStateFor, foldSubagents, openSubagentToast, sessionForNodes, shortId, starredOf, toastDurationFor, workspaceForNodes } from './logic.js'
+import { canDropOnWorkspace, dotStateFor, effectiveTitleOf, foldSubagents, openSubagentToast, sessionForNodes, shortId, starredOf, titleBackfillDecision, toastDurationFor, workspaceForNodes } from './logic.js'
 
 export const inject = ['slots']
 
@@ -359,6 +359,7 @@ function SessionPanel({ workspacesSvc }) {
   const [trashCheck, setTrashCheck] = useState(null)
   const [purgeTarget, setPurgeTarget] = useState(null)
   const [details, setDetails] = useState({})
+  const detailsAt = useRef({})
   const [openDetails, setOpenDetails] = useState(null)
   const [detailsLoading, setDetailsLoading] = useState(null)
   const [mdBusy, setMdBusy] = useState(null)
@@ -439,6 +440,14 @@ function SessionPanel({ workspacesSvc }) {
     return () => { if (timer.current) clearTimeout(timer.current) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // v3.6.2 #5：面板只在 mount 拉一次，预热窗口内打开 = 整列占位冻结到手点
+  // 「重新加载」。这里挂一个 warm-done 钩子：host 预热从「在途」翻到「完成」
+  // 的瞬间自动补一次刷新（标题/血缘/空白分类一起浮现）。空闲时该转换不发生，
+  // 不引入任何周期性刷新。
+  const refreshRef = useRef(null)
+  refreshRef.current = refresh
+  useEffect(() => dsmOnWarmDone(() => { if (refreshRef.current) refreshRef.current() }), [])
 
   useEffect(() => {
     try { localStorage.setItem(PANEL_PREFS_KEY, JSON.stringify({ filter, workspaceFilter, sortBy, groupByLineage })) } catch (e) {}
@@ -556,11 +565,13 @@ function SessionPanel({ workspacesSvc }) {
     const filtered = base.filter((item) => {
       if (workspaceFilter !== 'all' && (item.workspacePath || '') !== workspaceFilter) return false
       if (!needle) return true
-      return [item.title, item.sessionId, item.workspaceTitle, item.workspacePath].some((value) => String(value || '').toLocaleLowerCase().includes(needle))
+      // v3.6.2 #6：占位标题的会话按「有效标题」（列表值 → 侧栏权威回落）匹配，
+      // 预热补齐但面板未刷新时也能按关键词搜到。
+      return [effectiveTitleOf(item, dsmAuthoritativeTitles), item.sessionId, item.workspaceTitle, item.workspacePath].some((value) => String(value || '').toLocaleLowerCase().includes(needle))
     })
     return [...filtered].sort((a, b) => {
       if (sortBy === 'oldest') return Number(a.createdAt || 0) - Number(b.createdAt || 0)
-      if (sortBy === 'title') return String(a.title || '').localeCompare(String(b.title || ''), 'zh-CN')
+      if (sortBy === 'title') return effectiveTitleOf(a, dsmAuthoritativeTitles).localeCompare(effectiveTitleOf(b, dsmAuthoritativeTitles), 'zh-CN')
       return Number(b.createdAt || 0) - Number(a.createdAt || 0)
     })
   }, [sessions, filter, query, workspaceFilter, sortBy, emptyList, starredList])
@@ -917,10 +928,22 @@ function SessionPanel({ workspacesSvc }) {
 
   const toggleDetails = (it) => {
     if (openDetails === it.sessionId) { setOpenDetails(null); return }
-    if (details[it.sessionId]) { setOpenDetails(it.sessionId); return }
+    if (details[it.sessionId]) {
+      // v3.6.2 #11：详情是同生命周期内永不失效的快照，重开永远显示旧数。
+      // 加 30s TTL：过期即后台重取（先展示旧数据不闪空，回来再替换）。
+      setOpenDetails(it.sessionId)
+      const at = detailsAt.current[it.sessionId] || 0
+      if (Date.now() - at > 30000) {
+        postJSON('/archived-sessions/details', { sessionId: it.sessionId })
+          .then((d) => { detailsAt.current[it.sessionId] = Date.now(); setDetails((m) => ({ ...m, [it.sessionId]: d })) })
+          .catch(() => {})
+      }
+      return
+    }
     setDetailsLoading(it.sessionId)
     postJSON('/archived-sessions/details', { sessionId: it.sessionId })
       .then((d) => {
+        detailsAt.current[it.sessionId] = Date.now()
         setDetails((m) => ({ ...m, [it.sessionId]: d }))
         setDetailsLoading(null)
         setOpenDetails(it.sessionId)
@@ -1638,6 +1661,16 @@ let dsmCapabilities = null
 // 血缘分层披露（issue #6）：服务端血缘分类 + 本地视图状态。
 // dsmLineage: id → { origin, parentSession, delegationDepth, empty }
 const dsmLineage = new Map()
+// v3.6.2：host 预热是否还在途（sidebar-state/sessions 的 warmPending 旗标）。
+// 在途 → 侧栏轮询从 32s 台阶收紧到每拍（4s），标题/血缘一补齐就浮现；
+// 完成瞬间（true→false）触发一次性回调（面板自动补刷新，见 dsmOnWarmDone）。
+let dsmWarmPending = false
+let dsmTrashRetryTimer = null
+const dsmWarmDoneHooks = new Set()
+function dsmOnWarmDone(fn) {
+  dsmWarmDoneHooks.add(fn)
+  return () => dsmWarmDoneHooks.delete(fn)
+}
 // 空白会话一律隐藏（原「纯净视图」的默认行为固化为唯一行为，开关已于
 // 0.1.3 移除：上游本就不把空白会话渲染进侧栏，开关没有可服务的场景）。
 // 只隐藏，永不删除；子代理行按 DSH 设计不进侧栏（ui-subagent README 明文
@@ -1665,8 +1698,19 @@ async function dsmLoadTrashIds() {
     for (const [id, info] of Object.entries((r && r.lineage) || {})) {
       if (info && typeof info === 'object') dsmLineage.set(String(id), info)
     }
+    // v3.6.2：预热完成的瞬间广播一次（面板挂自动补刷新；侧栏靠节拍恢复 32s）。
+    const wasPending = dsmWarmPending
+    dsmWarmPending = !!(r && r.warmPending)
+    if (wasPending && !dsmWarmPending) { try { for (const fn of dsmWarmDoneHooks) fn() } catch (e) { /* hook 出错不断主流程 */ } }
     if (dsmRepaintDots) dsmRepaintDots()
-  } catch (e) { /* keep last known set */ }
+  } catch (e) {
+    /* keep last known set */
+    // v3.6.2 C：失败不再等下一个 32s 台阶——2s 后快速重试一次（已有待重试则跳过）。
+    if (dsmTrashRetryTimer == null) {
+      dsmTrashRetryTimer = setTimeout(() => { dsmTrashRetryTimer = null; dsmLoadTrashIds() }, 2000)
+      if (typeof dsmTrashRetryTimer.unref === 'function') dsmTrashRetryTimer.unref()
+    }
+  }
   return dsmTrashIds
 }
 
@@ -2068,7 +2112,10 @@ function installSidebarStatusDots() {
     error: 'var(--dsw-alias-state-error-primary)',            // 红 出错/需关注 (DSH error)
   }
   const manualUnread = dsmLoadManual()
-  const titleInitializedRows = new WeakSet()
+  // v3.6.2 #2：原 WeakSet「首绘一次即终身免改」升级为 WeakMap 所有权记录
+  // row → { id, text, authoritative }。权威标题**后到**时回填仍由我们持有文本的
+  // 行；官方（重命名等）改写文本后所有权移交，绝不覆盖 DSH Core 的实时更新。
+  const titleBaselines = new WeakMap()
   // 空分组兜底：DSH 会把「日志已不在原处」的会话重新归到「未分组」组里（删
   // 除后最明显）。我们把行隐藏了，但空组标题会留下来——所以组内所有行都被
   // 隐藏时，把整个分组（含它的标题行）一起隐藏；组内重新出现可见行时自动
@@ -2185,20 +2232,24 @@ function installSidebarStatusDots() {
       if (row.style.display === 'none') row.style.display = ''
       if (!isEmpty && li && li.parentSession && li.origin !== 'subagent') {
         // fork 分支行：绿「⑂ 分支」chip，点击滚动并高亮父会话行。
-        if (!row.querySelector('[data-dsm-tag="fork"]')) {
-          const fork = document.createElement('button')
+        // v3.6.2 #3：chip 每次 paint 幂等同步（存在才不建，但 tooltip/父 id
+        // 随最新权威数据刷新）——旧实现「创建即定格」，父标题后到时 tooltip
+        // 永远停在降级文案；点击改读 dataset，React 复用行 DOM 也不会切错父。
+        const parentTitle = dsmAuthoritativeTitles.get(li.parentSession)
+        const tip = parentTitle ? '分支于：' + parentTitle : '分支会话（点击查看来源会话）'
+        let fork = row.querySelector('[data-dsm-tag="fork"]')
+        if (!fork) {
+          fork = document.createElement('button')
           fork.type = 'button'
           fork.dataset.dsmTag = 'fork'
           fork.className = 'dsm-tag dsm-tag-fork'
-          const parentTitle = dsmAuthoritativeTitles.get(li.parentSession)
           fork.textContent = '⑂ 分支'
-          fork.title = parentTitle ? '分支于：' + parentTitle : '分支会话（点击查看来源会话）'
-          fork.setAttribute('aria-label', fork.title)
           fork.addEventListener('click', (e) => {
             e.stopPropagation(); e.preventDefault()
+            const target = e.currentTarget.dataset.dsmForkParent || ''
             const rows = document.querySelectorAll('[role="treeitem"]')
             for (const other of rows) {
-              if (rowId(other) === li.parentSession) {
+              if (rowId(other) === target) {
                 other.scrollIntoView({ block: 'center', behavior: 'smooth' })
                 other.classList.add('dsm-row-flash')
                 setTimeout(() => other.classList.remove('dsm-row-flash'), 1200)
@@ -2208,6 +2259,8 @@ function installSidebarStatusDots() {
           })
           row.appendChild(fork)
         }
+        if (fork.dataset.dsmForkParent !== li.parentSession) fork.dataset.dsmForkParent = String(li.parentSession)
+        if (fork.title !== tip) { fork.title = tip; fork.setAttribute('aria-label', tip) }
       } else {
         const staleFork = row.querySelector('[data-dsm-tag="fork"]')
         if (staleFork) staleFork.remove()
@@ -2261,19 +2314,31 @@ function installSidebarStatusDots() {
       // Session is opened. Paint the latest log-folded title from the host
       // authority without materializing the Session or changing its log.
       const authoritativeTitle = dsmAuthoritativeTitles.get(id)
-      if (!titleInitializedRows.has(row)) {
-        const node = rowNode(row) || {}
-        const expected = new Set([node.title, node.displayTitle, node.name].filter((value) => typeof value === 'string'))
-        const spans = [...row.children].filter((el) => el.tagName === 'SPAN' && !el.querySelector('[data-state]') && (el.textContent || '').trim())
-        const titleEl = spans.find((el) => expected.has((el.textContent || '').trim())) || spans[0]
-        if (titleEl) {
-          const correction = authoritativeTitleForFirstPaint({
-            firstPaint: true,
-            rendered: titleEl.textContent || '',
-            authoritative: authoritativeTitle || '',
-          })
-          if (correction) titleEl.textContent = correction
-          titleInitializedRows.add(row)
+      {
+        const base = titleBaselines.get(row)
+        // 零成本快路径：已定型且权威没更新 → 不查 DOM 不比较。
+        if (!base || base.id !== id || (authoritativeTitle && authoritativeTitle !== base.authoritative)) {
+          const node = rowNode(row) || {}
+          const expected = new Set([node.title, node.displayTitle, node.name].filter((value) => typeof value === 'string'))
+          const spans = [...row.children].filter((el) => el.tagName === 'SPAN' && !el.querySelector('[data-state]') && (el.textContent || '').trim())
+          let titleEl = null
+          if (base && base.id === id) {
+            // 回填路径：只认我们上次写入/记录的那段文本，绝不猜别的 span。
+            titleEl = spans.find((el) => (el.textContent || '') === base.text) || spans.find((el) => expected.has((el.textContent || '').trim())) || null
+          } else {
+            titleEl = spans.find((el) => expected.has((el.textContent || '').trim())) || spans[0] || null
+          }
+          if (titleEl) {
+            const d = titleBackfillDecision({
+              rendered: titleEl.textContent || '',
+              baseline: base && base.id === id ? { text: base.text, authoritative: base.authoritative } : null,
+              authoritative: authoritativeTitle || '',
+            })
+            if (d) {
+              if (d.changed && titleEl.textContent !== d.text) titleEl.textContent = d.text
+              titleBaselines.set(row, { id, text: d.nextBaseline.text, authoritative: d.nextBaseline.authoritative })
+            }
+          }
         }
       }
       // Read DSH's REAL session status from the row's own StateDot and recolor
@@ -2407,7 +2472,10 @@ function installSidebarStatusDots() {
     const flat = []
     const walk = (nodes, depth) => { for (const n of nodes || []) { flat.push([n, depth]); if (depth < 4) walk(n.children, depth + 1) } }
     walk(rec.nodes, 0)
-    const sig = rec.status + '|' + flat.map(([n, d]) => [n.sessionId, n.title, n.live ? 1 : 0, n.sizeBytes, d].join(':')).join(';')
+    // v3.6.2 #8：树里 title 为 null（未暖/失败）的子节点用侧栏权威标题回落
+    // 参与签名与渲染——权威后到时签名变化，展开态就地补写，不再定格短 id。
+    const effTitle = (n) => n.title || dsmAuthoritativeTitles.get(String(n.sessionId)) || ''
+    const sig = rec.status + '|' + flat.map(([n, d]) => [n.sessionId, effTitle(n), n.live ? 1 : 0, n.sizeBytes, d].join(':')).join(';')
     if (box.dataset.dsmSig === sig) return
     box.dataset.dsmSig = sig
     box.textContent = ''
@@ -2436,7 +2504,7 @@ function installSidebarStatusDots() {
       })
       const name = document.createElement('span')
       name.className = 'dsm-sub-name'
-      name.textContent = n.title || (String(n.sessionId).slice(0, 8) + '…')
+      name.textContent = effTitle(n) || (String(n.sessionId).slice(0, 8) + '…')
       name.title = n.sessionId
       r.appendChild(name)
       const meta = document.createElement('span')
@@ -2466,11 +2534,18 @@ function installSidebarStatusDots() {
   const FALLBACK_TICK_MS = 4000
   const tick = () => {
     if (typeof document !== 'undefined' && document.hidden) return
-    if (++dsmTrashTick % 8 === 0) dsmLoadTrashIds()
+    // v3.6.2 C：预热在途时每拍（4s）都拉 sidebar-state，补齐结果立刻浮现；
+    // 空闲时维持低频 32s（3.4.1 移除全表轮询的性能决策不回退——这里轮询的
+    // 是轻量 authority 路由，且仅在有活可补的窗口期加速）。
+    const cadence = dsmWarmPending ? 1 : 8
+    if (++dsmTrashTick % cadence === 0) dsmLoadTrashIds()
     paint()
   }
   tick()
   dsmLoadTrashIds()
+  // v3.6.2 C：冷启动快速二拍——首拉响应可能仍被空白精判/预热排队压着，
+  // 1.5s 后再拉一次，把「⑂ 分支」等后到信息的台阶从 32s 缩到秒级。
+  const coldSecondBeat = setTimeout(() => dsmLoadTrashIds(), 1500)
   paint()
   const obs = new MutationObserver(schedulePaint)
   obs.observe(document.body, {
@@ -2485,6 +2560,7 @@ function installSidebarStatusDots() {
   // 跟着旧闭包活到页面关闭，注入节点也会留在侧栏上。
   return () => {
     clearInterval(tickTimer)
+    clearTimeout(coldSecondBeat)
     obs.disconnect()
     dsmTeardownSidebarAug()
   }

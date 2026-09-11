@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { authoritativeTitleForFirstPaint, canDropOnWorkspace, dotStateFor, foldSubagents, openSubagentToast, sessionForNodes, shortId, starredOf, TOAST_MAX_MS, TOAST_MIN_MS, toastDurationFor, workspaceForNodes } from '../src/client/logic.js'
+import { authoritativeTitleForFirstPaint, canDropOnWorkspace, dotStateFor, effectiveTitleOf, foldSubagents, openSubagentToast, sessionForNodes, shortId, starredOf, titleBackfillDecision, TOAST_MAX_MS, TOAST_MIN_MS, toastDurationFor, workspaceForNodes } from '../src/client/logic.js'
 
 // ---- dotStateFor：状态点语义 ----------------------------------------------
 // 历史回归：DSH 把 running 报成 ongoing（9766476）；done 在当前行上不能亮绿
@@ -229,3 +229,36 @@ test('失败类提示停得更久，且同样受上限约束', () => {
   // 但同样受上限约束
   assert.equal(toastDurationFor('x'.repeat(5000), 'err'), TOAST_MAX_MS)
 })
+
+// —— v3.6.2 #2/#6：占位标题的后到回填与有效标题 ——————————————————————————
+
+test('titleBackfillDecision: 首绘有权威用权威，无权威只记所有权', () => {
+  const withAuth = titleBackfillDecision({ rendered: '冷标题', baseline: null, authoritative: '真标题' })
+  assert.equal(withAuth.changed, true)
+  assert.equal(withAuth.text, '真标题')
+  const placeholder = titleBackfillDecision({ rendered: '冷标题', baseline: null, authoritative: '' })
+  assert.equal(placeholder.changed, false)
+  assert.equal(placeholder.nextBaseline.text, '冷标题')
+})
+
+test('titleBackfillDecision: 占位行在权威后到时回填；同值返回 null', () => {
+  const d = titleBackfillDecision({ rendered: '冷标题', baseline: { text: '冷标题', authoritative: null }, authoritative: '真标题' })
+  assert.equal(d.changed, true)
+  assert.equal(d.text, '真标题')
+  assert.equal(titleBackfillDecision({ rendered: '真标题', baseline: { text: '真标题', authoritative: '真标题' }, authoritative: '真标题' }), null)
+})
+
+test('titleBackfillDecision: 官方改写文本后所有权移交，绝不覆盖', () => {
+  const d = titleBackfillDecision({ rendered: '用户重命名', baseline: { text: '我们写入的标题', authoritative: '我们写入的标题' }, authoritative: '别的' })
+  assert.equal(d.changed, false)
+  assert.equal(d.nextBaseline.text, '用户重命名')
+})
+
+test('effectiveTitleOf: 列表值优先，占位回落权威，都没有给空串', () => {
+  const map = new Map([['s1', '权威标题']])
+  assert.equal(effectiveTitleOf({ sessionId: 's1', title: '列表标题' }, map), '列表标题')
+  assert.equal(effectiveTitleOf({ sessionId: 's1', title: null }, map), '权威标题')
+  assert.equal(effectiveTitleOf({ sessionId: 's2', title: null }, map), '')
+  assert.equal(effectiveTitleOf(null, map), '')
+})
+
