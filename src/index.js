@@ -18,7 +18,7 @@ import { createPendingMoveStore } from './pending-moves.js'
 import { sweepStaleStateTemps } from './state-temp-sweep.js'
 import { aggregateStorage } from './storage-stats.js'
 import { createAutoArchiveStore, pickInactiveCandidates } from './auto-archive.js'
-import { createSessionMetaCache, fingerprintOf, isPersistableFingerprint } from './session-meta-cache.js'
+import { createSessionMetaCache, persistFingerprintOf } from './session-meta-cache.js'
 import { createTitleIndexStore } from './title-persist-index.js'
 import { createPersistenceAdapter } from './compat/persistence.js'
 import { detectCapabilities, requireCapability } from './compat/capabilities.js'
@@ -179,8 +179,11 @@ export function apply(ctx) {
       const stat = statsById.get(id)
       const entry = store && store[id]
       if (!stat || !entry) continue
-      const fp = fingerprintOf(stat)
-      if (!isPersistableFingerprint(fp)) continue
+      // 持久索引只认可跨重启的指纹（legacy 的文件指纹 / handle 世代的 sz 指纹，
+      // 见 session-meta-cache.persistFingerprintOf——issue #8 之前 handle 世代
+      // 从不落盘，导致每次重启都全量重新解码）。
+      const fp = persistFingerprintOf(stat)
+      if (!fp) continue
       if (fp && entry.fingerprint === fp) {
         hits.set(id, { title: entry.title, cwd: entry.cwd, createdAt: entry.createdAt })
       }
@@ -192,15 +195,15 @@ export function apply(ctx) {
   // 队列内部已串行化 + 原子替换）。**必须 await** —— 它是持久写入，浮动写入会在
   // 调用方/测试 teardown 已开始清理状态目录时落地（`ENOTEMPTY: rmdir .../state`），
   // 且"响应已返回但索引没落盘"时进程若恰好退出就会丢条目。
-  // ⚠️ revision 指纹（SessionHandle 世代）绝不落盘：它只在当前 service
-  // 实例内有意义，跨进程比较无意义，误用会把陈旧数据当新鲜数据。
+  // 指纹用 persistFingerprintOf：legacy 文件指纹 + handle 世代 sz(sizeBytes) 指纹
+  // 都可跨重启；rev: 指纹仍被排除（实例内 opaque token，issue #8）。
   async function persistDecoded(decoded, statsById) {
     if (!decoded || !decoded.size) return
     const batch = {}
     const now = Date.now()
     for (const [id, meta] of decoded) {
-      const fp = fingerprintOf(statsById.get(id))
-      if (!isPersistableFingerprint(fp)) continue
+      const fp = persistFingerprintOf(statsById.get(id))
+      if (!fp) continue
       batch[id] = { title: meta.title, cwd: meta.cwd, createdAt: meta.createdAt, fingerprint: fp, updatedAt: now }
     }
     if (!Object.keys(batch).length) return
@@ -284,65 +287,82 @@ export function apply(ctx) {
 
   // Resolve one session's display metadata.
   //
-  // 成本模型（issue #1）：下面的解码路径会把整本 .jsonl.zstd 逐帧解压、逐行
-  // JSON.parse，只为折叠出标题——大库上一次全表要几秒阻塞式 CPU。日志内容没变
-  // 就意味着折叠结果不可能变（legacy 用 (mtime, size) 文件指纹；SessionHandle
-  // 世代用官方 snapshot.revision），命中即直接复用，跳过整本解码。
+  // 成本模型（issue #1 → issue #8）：runtime 的标题投影（readTitleSnapshots）
+  // 在 0.1.x 上对每条非 live 会话都是**整本日志解码**（SessionCorpus.projectMany
+  // → inspectPersisted）。列表构建绝不能在请求路径上同步触发它——issue #8 实测：
+  // 87 本日志 / 249MB 的库，一次冷启动全量投影把宿主打满 ~90s CPU。
   //
-  // 0.1.3-alpha 兼容（避免放大官方已知的历史会话加载性能回退）：
-  //   - cwd/createdAt 优先来自 list() 快照的 snapshot.header；
-  //   - 标题优先来自批量 readTitleSnapshots；
-  //   - **标题缺失绝不单独触发整本日志解码**——无标题就显示「(无标题)」。
-  //     只有在拿不到 cwd（工作区归属失效）或 runtime 完全没有标题投影能力时
-  //     才回退到日志解码，且该解码走 inspectSession 分块折叠，不做整本驻留。
-  async function resolveOne(id, usage, opts = {}) {
-    const key = String(id)
-    const statInfo = usage ? (usage.statsById ? usage.statsById.get(key) : null)
-      || { mtimeMs: usage.mtimeById && usage.mtimeById.get(key), size: usage.sizeById && usage.sizeById.get(key) } : null
-    const cached = metaCache.get(key, statInfo)
-    if (cached) return buildItem(key, cached, usage, opts.exposeUsage)
+  // 因此请求路径只消费两级缓存（metaCache 内存缓存 → titleIndex 持久索引），
+  // 缺失的会话交给后台预热队列分批补齐（见 enqueueWarm/runWarm）；侧栏高频
+  // 轮询 + 管理面板刷新会让补齐结果自然浮现。
+  const EMPTY_META = { title: null, cwd: null, createdAt: null }
 
-    let meta = { title: null, cwd: null, createdAt: null }
-    // 第一来源：list() 返回的 SessionPersistenceSnapshot.header（0.1.3+ 官方
-    // 契约里 header 携带 cwd/createdAt，无需任何日志读取）。
-    if (opts.listHeader) {
-      if (typeof opts.listHeader.cwd === 'string') meta.cwd = opts.listHeader.cwd
-      if (opts.listHeader.createdAt != null) meta.createdAt = opts.listHeader.createdAt
+  // —— 冷启动后台预热（issue #8）—————————————————————————————————————
+  // 单飞队列：请求路径发现缓存未命中的会话，把 { stat, header } 快照丢进
+  // warmQueue，由 runWarm 以小批次消费。每批之间 setImmediate 让步事件循环，
+  // 绝不独占宿主主线程；结果写 metaCache + 持久标题索引。stat 是入队时刻的
+  // 快照——若日志在预热期间又变了，下次请求的指纹比对会再次判未命中并重新
+  // 入队，天然自愈。
+  const WARM_CHUNK = 4
+  const warmQueue = new Map()
+  let warmRunning = false
+  let warmKickTimer = null
+
+  function scheduleWarm() {
+    if (warmKickTimer || warmRunning) return
+    warmKickTimer = setTimeout(() => { warmKickTimer = null; runWarm() }, 25)
+    // unref：预热绝不反过来把宿主进程钉住（与 autoArchive「无定时器」同一原则）。
+    if (typeof warmKickTimer.unref === 'function') warmKickTimer.unref()
+  }
+
+  function enqueueWarm(ids, statsById, entryById) {
+    if (!ids || !ids.length) return
+    for (const id of ids) {
+      const key = String(id)
+      const entry = entryById ? entryById.get(key) : null
+      warmQueue.set(key, {
+        stat: statsById ? (statsById.get(key) || null) : null,
+        header: (entry && entry.header) || null,
+      })
     }
-    if (opts.preloaded !== undefined) {
-      const projected = metaFromSnapshot(unwrapSnapshot(opts.preloaded))
-      if (projected.title) meta.title = projected.title
-      if (!meta.cwd && projected.cwd) meta.cwd = projected.cwd
-      if (!meta.createdAt && projected.createdAt) meta.createdAt = projected.createdAt
-    } else if (typeof sq.readTitleSnapshot === 'function') {
-      try {
-        const projected = metaFromSnapshot(await sq.readTitleSnapshot(id))
-        if (projected.title) meta.title = projected.title
-        if (!meta.cwd && projected.cwd) meta.cwd = projected.cwd
-        if (!meta.createdAt && projected.createdAt) meta.createdAt = projected.createdAt
-      } catch (e) { /* fall through */ }
+    scheduleWarm()
+  }
+
+  async function runWarm() {
+    if (warmRunning) return
+    warmRunning = true
+    try {
+      while (warmQueue.size) {
+        const batch = [...warmQueue.entries()].slice(0, WARM_CHUNK)
+        for (const [id] of batch) warmQueue.delete(id)
+        try {
+          const ids = batch.map(([id]) => id)
+          const snapshotById = await projectTitles(ids)
+          const decoded = new Map()
+          const statsById = new Map()
+          for (const [id, desc] of batch) {
+            const snapshot = snapshotById.has(id) ? snapshotById.get(id) : null
+            const meta = metaFromSnapshot(snapshot)
+            // cwd/createdAt 永远以最新 list header 为权威（投影的 session 头可能
+            // 陈旧；移动会话后尤其如此），投影只负责标题。
+            if (desc.header) {
+              if (typeof desc.header.cwd === 'string') meta.cwd = desc.header.cwd
+              if (desc.header.createdAt != null) meta.createdAt = desc.header.createdAt
+            }
+            metaCache.set(id, desc.stat, meta)
+            statsById.set(id, desc.stat)
+            if (desc.stat) decoded.set(id, meta)
+          }
+          await persistDecoded(decoded, statsById)
+        } catch (e) { /* 单批失败不影响后续批次：索引/缓存只是加速器 */ }
+        // 批间让步：保证宿主事件循环（RPC/心跳/其他插件）始终可调度。
+        await new Promise((resolve) => setImmediate(resolve))
+      }
+    } finally {
+      warmRunning = false
+      // 预热期间又有新请求入队 → 再排一轮。
+      if (warmQueue.size) scheduleWarm()
     }
-    // cwd 缺失 → 工作区归属失效，值得一次解码兜底（cwd 在 header 里，通常
-    // 快照已带回，这里只在快照缺 cwd 时发生）。runtime 完全没有标题投影能力
-    // 时（老后端无 readTitleSnapshot），解码同时兜底标题。
-    const projectionAvailable = typeof sq.readTitleSnapshot === 'function' || typeof sq.readTitleSnapshots === 'function'
-    if (!meta.cwd || (!meta.title && !projectionAvailable)) {
-      try {
-        let foldedTitle = null
-        const summary = await persistence.inspectSession(key, {
-          onEvents: (events) => { if (!foldedTitle) foldedTitle = foldTitle(events) },
-        })
-        if (summary && summary.meta) {
-          if (!meta.cwd) meta.cwd = summary.meta.cwd || null
-          if (!meta.createdAt) meta.createdAt = summary.meta.createdAt || null
-        }
-        if (!meta.title && foldedTitle) meta.title = foldedTitle
-      } catch (e2) { /* keep what we have */ }
-    }
-    metaCache.set(key, statInfo, meta)
-    // 本条是「真解码」出来的：交给调用方回写持久标题索引（P4 冷启动加速）。
-    if (opts.collectDecoded && statInfo) opts.collectDecoded(key, meta)
-    return buildItem(key, meta, usage, opts.exposeUsage)
   }
 
   // Disk usage + last-write time for every session, in one pass. Also produces
@@ -373,10 +393,13 @@ export function apply(ctx) {
         const id = entry && entry.id != null ? String(entry.id) : (header && header.id != null ? String(header.id) : null)
         if (!id) return
         // SessionHandle 世代：snapshot（header/revision/sizeBytes）是权威轻量
-        // 观察，绝不再绕道私有磁盘路径补 stat。
+        // 观察，绝不再绕道私有磁盘路径补 stat。revision 进内存缓存指纹；
+        // sizeBytes 供 persistFingerprintOf 派生跨重启的 sz 持久指纹（issue #8）。
         if (entry && typeof entry.revision === 'string' && entry.revision) {
           if (Number.isFinite(entry.sizeBytes)) sizeById.set(id, Number(entry.sizeBytes))
-          statsById.set(id, { revision: entry.revision })
+          statsById.set(id, Number.isFinite(entry.sizeBytes)
+            ? { revision: entry.revision, sizeBytes: Number(entry.sizeBytes) }
+            : { revision: entry.revision })
           return
         }
         if (entry && Number.isFinite(entry.sizeBytes)) sizeById.set(id, Number(entry.sizeBytes))
@@ -1212,7 +1235,8 @@ export function apply(ctx) {
   //   1. sp.list() 只调一次（原先列了两遍目录）
   //   2. 变更令牌优先来自 list 快照：legacy 走 locate+stat，SessionHandle 世代
   //      直接用 snapshot.revision（无 locate 可用，也绝不绕私有路径补 stat）
-  //   3. 未命中缓存的会话走**一次**批量投影（sq.readTitleSnapshots），而不是逐条
+  //   3. 缓存未命中的会话**绝不在请求路径上同步投影**（issue #8：runtime 的
+  //      readTitleSnapshots 每条都是整本解码）——入队后台预热，先以占位元数据返回
   async function allSessionItemsDetailed(opts = {}) {
     let entries = []
     let headersOk = false
@@ -1242,37 +1266,59 @@ export function apply(ctx) {
     wsByPath = {}
     try { for (const ent of w.list()) wsByPath[ent.path] = ent } catch (e) { wsByPath = {} }
     const currentArchived = new Set((await archivedState().catch(() => ({ archivedSessionIds: [] }))).archivedSessionIds || [])
-    const items = []
     const usage = await collectUsage(entries)
-    // 先按指纹把「缓存命中」与「需要解码」分开，只对后者做批量投影。
+    // 先按指纹把「缓存命中」与「需要补齐」分开。
     const statsById = new Map(visibleIds.map((id) => [
       id,
       (usage.statsById && usage.statsById.get(id)) || { mtimeMs: usage.mtimeById.get(id), size: usage.sizeById.get(id) },
     ]))
-    const { missing } = metaCache.partition(visibleIds, statsById)
+    const { cached, missing } = metaCache.partition(visibleIds, statsById)
     // P4：missing 里先查持久标题索引（冷启动跳过整本解码），命中的回填内存缓存。
+    // cwd/createdAt 回填时以最新 list header 为权威——持久条目里的 cwd 可能因
+    // 移动会话而陈旧（sz 指纹对 cwd 无感知），标题才是索引的产出物。
     const persisted = await hydrateFromPersist(missing, statsById)
-    for (const [id, meta] of persisted) metaCache.set(id, statsById.get(id), meta)
-    const stillMissing = missing.filter((id) => !persisted.has(id))
-    const snapshotById = await projectTitles(stillMissing)
-    const decoded = new Map()
-    const collectDecoded = (id, meta) => { decoded.set(id, meta) }
-    const CHUNK = 6
-    for (let i = 0; i < visibleIds.length; i += CHUNK) {
-      // Arrow wrapper on purpose: Array#map passes (value, index, array), and
-      // resolveOne's second and third arguments are fixed here.
-      const res2 = await Promise.all(visibleIds.slice(i, i + CHUNK).map((id) => {
-        const entry = entryById.get(id)
-        return resolveOne(id, usage, {
-          exposeUsage: !!(opts && opts.usage),
-          listHeader: entry ? entry.header : null,
-          preloaded: snapshotById.has(id) ? snapshotById.get(id) : undefined,
-          collectDecoded,
-        })
-      }))
-      for (const it of res2) items.push({ ...it, archived: currentArchived.has(it.sessionId) })
+    for (const [id, meta] of persisted) {
+      const entry = entryById.get(id)
+      const header = entry && entry.header ? entry.header : null
+      metaCache.set(id, statsById.get(id), {
+        title: meta.title,
+        cwd: (header && typeof header.cwd === 'string' && header.cwd) ? header.cwd : meta.cwd,
+        createdAt: (header && header.createdAt != null) ? header.createdAt : meta.createdAt,
+      })
     }
-    await persistDecoded(decoded, statsById)
+    const stillMissing = missing.filter((id) => !persisted.has(id))
+    // issue #8：缺失部分交后台预热（分批 + 让步），请求路径零投影、零日志解码。
+    if (stillMissing.length) enqueueWarm(stillMissing, statsById, entryById)
+    const items = []
+    for (const id of visibleIds) {
+      // metaCache 优先：persisted 命中已带 header 权威 cwd/createdAt 回填进
+      // metaCache（persisted.get 里的 cwd 可能因移动会话而陈旧）。
+      // 完全未命中的会话也不能丢 cwd/createdAt——它们来自 list header，零成本
+      // 且是工作区归属/创建时间的权威来源；只有标题允许占位等后台预热（issue #8）。
+      let meta = metaCache.get(id, statsById.get(id)) || persisted.get(id) || null
+      if (!meta) {
+        meta = { title: null, cwd: null, createdAt: null }
+        const entry = entryById.get(id)
+        const header = entry && entry.header ? entry.header : null
+        if (header) {
+          if (typeof header.cwd === 'string') meta.cwd = header.cwd
+          if (header.createdAt != null) meta.createdAt = header.createdAt
+        }
+      }
+      const it = buildItem(id, meta, usage, !!(opts && opts.usage))
+      items.push({ ...it, archived: currentArchived.has(it.sessionId) })
+    }
+    if (opts && opts.onlyArchived) {
+      // /archived-sessions/list 的语义：只返回归档集里仍然存在的会话，
+      // 且不带 archived 布尔注记（旧路由的输出形状）。
+      const archivedItems = []
+      for (const it of items) {
+        if (!it.archived) continue
+        const { archived: _drop, ...rest } = it
+        archivedItems.push(rest)
+      }
+      return { items: archivedItems, usage }
+    }
     // Annotate stars; GC only when we have a trustworthy id baseline, so a
     // failing sp.list() can never wipe the whole index.
     let starredSet = new Set()
@@ -1360,6 +1406,7 @@ export function apply(ctx) {
     const activeTombstones = store.purgedSessionIds.map(String).filter((id) => !present.has(id))
     if (ids.length) {
       const usage = await collectUsage(entries)
+      const entryById = new Map(entries.map((entry) => [entry.id, entry]))
       const statsById = new Map(ids.map((id) => [
         id,
         (usage.statsById && usage.statsById.get(id)) || { mtimeMs: usage.mtimeById.get(id), size: usage.sizeById.get(id) },
@@ -1367,30 +1414,23 @@ export function apply(ctx) {
       const { cached, missing } = metaCache.partition(ids, statsById)
       // P4：与列表构建共用持久标题索引，冷启动零解码。
       const persisted = await hydrateFromPersist(missing, statsById)
-      for (const [id, meta] of persisted) metaCache.set(id, statsById.get(id), meta)
+      for (const [id, meta] of persisted) {
+        const entry = entryById.get(id)
+        const header = entry && entry.header ? entry.header : null
+        metaCache.set(id, statsById.get(id), {
+          title: meta.title,
+          cwd: (header && typeof header.cwd === 'string' && header.cwd) ? header.cwd : meta.cwd,
+          createdAt: (header && header.createdAt != null) ? header.createdAt : meta.createdAt,
+        })
+      }
       const rest = missing.filter((id) => !persisted.has(id))
-      const snapshotById = await projectTitles(rest)
-      const decoded = new Map()
-      const collectDecoded = (id, meta) => { decoded.set(id, meta) }
+      // issue #8：缺失标题不在请求路径上同步投影（runtime 投影 = 逐条整本解码），
+      // 交后台预热补齐；侧栏高频轮询会让补齐结果自然浮现。
+      if (rest.length) enqueueWarm(rest, statsById, entryById)
       for (const id of ids) {
-        let meta = cached.get(id) || persisted.get(id) || null
-        if (!meta) {
-          const entry = entries.find((e) => e.id === id)
-          const snapshot = snapshotById.has(id)
-            ? snapshotById.get(id)
-            : (typeof sq.readTitleSnapshot === 'function' ? await sq.readTitleSnapshot(id).catch(() => null) : null)
-          const next = metaFromSnapshot(snapshot)
-          if (entry && entry.header) {
-            if (!next.cwd && typeof entry.header.cwd === 'string') next.cwd = entry.header.cwd
-            if (!next.createdAt && entry.header.createdAt != null) next.createdAt = entry.header.createdAt
-          }
-          metaCache.set(id, statsById.get(id), next)
-          if (statsById.get(id)) collectDecoded(id, next)
-          meta = next
-        }
+        const meta = metaCache.get(id, statsById.get(id)) || persisted.get(id) || null
         if (meta && meta.title) authorityTitleCache.set(id, String(meta.title))
       }
-      await persistDecoded(decoded, statsById)
     }
     // 血缘分类（issue #6）：结构分类（子代理 / fork 分支）来自 list snapshot
     // 的 header，零解码；空白判定见下方 refineEmptyLineage（0.1.3 起体积法
@@ -1639,12 +1679,13 @@ export function apply(ctx) {
           const idStrs = ids.map(String).filter((id) => !hidden.has(id) && (materialized.has(id) || (live && live.get(id))))
           wsByPath = {}
           try { for (const ent of w.list()) wsByPath[ent.path] = ent } catch (e) { wsByPath = {} }
-          const items = []
-          const CHUNK = 6
-          for (let i = 0; i < idStrs.length; i += CHUNK) {
-            const res2 = await Promise.all(idStrs.slice(i, i + CHUNK).map((id) => resolveOne(id)))
-            items.push.apply(items, res2)
-          }
+          // issue #8：归档列表也复用「缓存直读 + 后台预热」的统一管线。
+          // 旧实现逐条 resolveOne(id)（无 header、无指纹）——冷启动对每条归档
+          // 会话整本解码，且连进程内缓存都永远命中不了。
+          const wanted = new Set(idStrs)
+          const detailed = await allSessionItemsDetailed()
+          const items = detailed.items.filter((it) => wanted.has(String(it.sessionId)) && it.archived)
+          for (const it of items) delete it.archived
           json(res, { items })
         } catch (e) {
           json(res, { error: String((e && e.message) || e) }, 500)

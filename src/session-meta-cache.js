@@ -58,6 +58,24 @@ export function isPersistableFingerprint(fingerprint) {
   return typeof fingerprint === 'string' && fingerprint !== '' && !fingerprint.startsWith(REVISION_PREFIX)
 }
 
+// 跨进程（重启后）仍可用的持久指纹，供 title-persist-index 使用（issue #8）。
+//
+//   - legacy 世代：fingerprintOf 产出 (mtimeMs:size) 文件指纹，本身可持久化；
+//   - handle 世代（0.1.3+）：fingerprintOf 产出 rev: 指纹，被 isPersistableFingerprint
+//     正确拒绝（revision 是实例内 opaque token）。但这样持久索引在该世代**从不
+//     写入**——issue #8 实测：249MB / 87 日志的库每次重启都重新全量解码约 90s。
+//     退而求其次用官方 list()/stat() 每次带回的 sizeBytes（"sz:<n>"）：
+//     日志任何追加/截断都会改变 size，size 不变而标题变化在真实场景里基本
+//     不存在；最坏代价是显示一条陈旧标题，绝不产生错误数据。
+//     cwd/createdAt 不受此影响：回填时始终以最新 list header 为权威（见 index.js）。
+//   - 拿不到任何可用观测量时返回 null（调用方按未命中/不落盘处理）。
+export function persistFingerprintOf(stat) {
+  const fp = fingerprintOf(stat)
+  if (fp && isPersistableFingerprint(fp)) return fp
+  if (stat && Number.isFinite(stat.sizeBytes) && stat.sizeBytes >= 0) return `sz:${stat.sizeBytes}`
+  return null
+}
+
 // 缓存条目是否仍然新鲜（纯函数）。
 // stat 传 { revision } 或 { mtimeMs, size }；两类指纹不能互相匹配。
 export function isFresh(entry, stat, now, ttlMs = DEFAULT_TTL_MS) {

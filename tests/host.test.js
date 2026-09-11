@@ -159,8 +159,16 @@ test('restores an archived trashed session to its pre-delete archived state', as
 })
 
 test('serves latest log-folded titles to the cold sidebar', async () => {
+  // issue #8：冷启动请求路径不同步折叠标题（runtime 投影 = 每条整本解码），
+  // 首屏先拿占位，后台预热补齐后由轮询自然浮现。
   const state = await call('/archived-sessions/sidebar-state')
-  assert.equal(state.body.titles['known-1'], 'Latest renamed title')
+  assert.equal(state.body.titles['known-1'], undefined, 'the cold request path must not decode logs synchronously')
+  for (let i = 0; i < 200; i++) {
+    const next = await call('/archived-sessions/sidebar-state')
+    if (next.body.titles['known-1'] === 'Latest renamed title') return
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  assert.fail('background warm never delivered the sidebar title')
 })
 
 // ---- 回收站状态机回归（0.1.3 兼容加固）-------------------------------------
