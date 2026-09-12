@@ -220,3 +220,168 @@ export function noticeToastPlan(raw, seenIds, max = 2) {
     ackIds: shown.map((n) => String(n.id)),
   }
 }
+
+// —— T3（3.7.0）：分支聚拢 ——
+// 把「同一父会话派生出的普通分支会话」归组，收拢到组锚（真实父行或合成头）
+// 之下。子代理已由 foldSubagents 先行摘除，本函数只处理非子代理的分支血缘。
+// 判定全部收敛为纯函数，供列表管线在 foldSubagents 之后调用；UI 接线不在此处。
+
+// 组内时间键：createdAt（>0）优先；缺失/非正回退 updatedAt——它是 host 后加的
+// 字段，老快照或尚未同步的行可能根本没有，必须宽容；两者都不可用按 0，交给
+// sessionId 决胜。
+export function branchTimeKey(item) {
+  const c = Number(item && item.createdAt)
+  if (Number.isFinite(c) && c > 0) return c
+  const u = Number(item && item.updatedAt)
+  if (Number.isFinite(u) && u > 0) return u
+  return 0
+}
+
+// 组内升序比较：时间差优先，决胜恒为 sessionId 字典序——即使宿主哪天给所有行
+// 都补上 createdAt，排序仍全序稳定、可复现。同毫秒/同零值也靠决胜定序。
+export function ascBranchTime(a, b) {
+  const ta = String((a && a.sessionId) ?? '')
+  const tb = String((b && b.sessionId) ?? '')
+  return branchTimeKey(a) - branchTimeKey(b) || ta.localeCompare(tb)
+}
+
+// 分支血缘边：lineage[id] 存在、origin 非 subagent、parentSession 非空且不
+// 自指，才返回父 id；否则 null（该行不是分支，不参与聚拢）。
+// 子代理即便漏进输入（上游本该是 foldSubagents 之后的 topList）也被 origin
+// 挡下——链上链下两层都锁，绝不入组。
+function branchParentOf(id, table) {
+  const info = table[id]
+  if (!info || typeof info !== 'object') return null
+  if (info.origin === 'subagent') return null
+  const p = info.parentSession ? String(info.parentSession) : null
+  if (!p || p === id) return null
+  return p
+}
+
+/**
+ * 分支聚拢：把普通分支会话（lineage 有 parentSession、非子代理、不自指）移入
+ * 组锚的分支组。
+ *
+ * 输入契约：items 应为 foldSubagents 之后的 topList（子代理已摘除）；lineage
+ * 形状 {id:{origin,parentSession,delegationDepth,empty}}。任何畸形输入（items
+ * 或 lineage 为 null、数组含洞/非对象行、lineage 非对象）都不得抛错——认不出
+ * 血缘的行一律原样留在顶层。
+ *
+ * 组锚解析（memo 化）：沿 parentSession 上溯，锚 = 链上第一个「在 items 中且
+ * 自身非分支」的行；父在 items 但也是分支 → 继续上溯（整条链拍平进同一组）；
+ * 父不在 items → 合成锚 = 链尾那个缺失父 id。visited Set + 步数上限防环；成
+ * 环的整条链不聚拢（行不丢，原地保 chip）；自指不算分支。
+ *
+ * 真实锚父行在 topList 中的位置纹丝不动；成员行从 topList 移出进 branchGroupsOf。
+ * 仅当锚是合成的（缺失父）才产出头行 {syntheticRoot:rootId, sessionId:'dsm-src:'+rootId}，
+ * 插入位置 = 组内最早成员（ascBranchTime 排序后的第一个）在原列表中的下标；
+ * 成员 ≥1 就出合成头（单孤儿与多孤儿统一规则）。组内恒按 ascBranchTime 升序
+ * （与调用方主排序方向无关）。
+ *
+ * 守恒不变量：topList 中非合成行数 + foldedCount === items.length（行不丢）。
+ *
+ * @param items 任意（应为 foldSubagents 之后的 topList 数组；畸形宽容）
+ * @param lineage 任意（血缘表 {id:{origin,parentSession,...}}；畸形宽容）
+ * @returns {{ topList: any[], branchGroupsOf: Map<string, any[]>, foldedCount: number, groupCount: number }}
+ *   topList 真实锚原位保留（或插入合成头行），branchGroupsOf 为 rootId → 升序
+ *   成员数组，foldedCount 为移出顶层的成员行数，groupCount 为组数。
+ */
+export function foldBranches(items, lineage) {
+  const list = Array.isArray(items) ? items : []
+  const table = lineage && typeof lineage === 'object' ? lineage : {}
+
+  const byId = new Map()
+  for (const it of list) {
+    if (it == null || it.sessionId == null) continue
+    byId.set(String(it.sessionId), it)
+  }
+
+  // 1) 组锚解析：向上走 parent 链。防环 = 访问集 + 步数上限（链上每个 id 至多
+  //    出现一次，上限只是兜底）；结果按起点 id memo。
+  const maxWalk = Object.keys(table).length + list.length + 2
+  const anchorMemo = new Map()
+  function resolveAnchor(id) {
+    if (anchorMemo.has(id)) return anchorMemo.get(id)
+    const seen = new Set([id])
+    let cur = id
+    let steps = 0
+    let anchor = null // null = 环 / 起点不是分支，整链不聚
+    while (true) {
+      const p = branchParentOf(cur, table)
+      if (!p) {
+        // cur 不是分支：起点若不是分支则不聚；否则停在祖先上，cur 即锚
+        // （循环不变量：除首轮外 cur 恒为分支，此分支只在起点命中）。
+        anchor = steps === 0 ? null : cur
+        break
+      }
+      if (seen.has(p)) break // 成环：anchor 保持 null
+      seen.add(p)
+      steps++
+      if (byId.has(p)) {
+        if (!branchParentOf(p, table)) {
+          anchor = p // p 在列表且自身非分支 → 真实锚
+          break
+        }
+        cur = p // p 在列表但也是分支 → 继续上溯（链拍平）
+        if (steps > maxWalk) break // 环：保持 null
+        continue
+      }
+      // p 不在列表：还是分支 → 继续上溯找更高祖先；否则合成锚 = p
+      if (!branchParentOf(p, table)) {
+        anchor = p
+        break
+      }
+      cur = p
+      if (steps > maxWalk) break // 环：保持 null
+    }
+    anchorMemo.set(id, anchor)
+    return anchor
+  }
+
+  // 2) 收集分组。anchorOfRow 按行对象记录锚（重复 id 的畸形行也各算各的），
+  //    foldedCount 按行计数——保证守恒律在含洞/重复 id 的输入下仍成立。
+  const groupsOf = new Map()
+  const anchorOfRow = new Map()
+  let foldedCount = 0
+  for (const it of list) {
+    if (it == null || it.sessionId == null) continue
+    const id = String(it.sessionId)
+    if (!branchParentOf(id, table)) continue // 非分支 / 子代理 / 自指 → 不动
+    const anchor = resolveAnchor(id)
+    if (!anchor || anchor === id) continue // 环 / 自锚异常 → 保持顶层可见
+    if (!groupsOf.has(anchor)) groupsOf.set(anchor, [])
+    groupsOf.get(anchor).push(it)
+    anchorOfRow.set(it, anchor)
+    foldedCount++
+  }
+
+  // 3) 组内升序（与主排序方向无关）；合成锚的组记下最早成员（升序第一个），
+  //    合成头将在它原来的位置插一次。
+  const earliest = new Set()
+  for (const [anchor, members] of groupsOf) {
+    members.sort(ascBranchTime)
+    if (!byId.has(anchor)) earliest.add(members[0])
+  }
+
+  // 4) topList 重建：非成员行（含畸形行）原样保序；成员行移出，合成组在最早
+  //    成员的原位置放一次合成头行。
+  const topList = []
+  const emitted = new Set()
+  for (const it of list) {
+    const anchor = it == null ? undefined : anchorOfRow.get(it)
+    if (anchor === undefined) {
+      topList.push(it)
+      continue
+    }
+    if (!byId.has(anchor) && !emitted.has(anchor) && earliest.has(it)) {
+      emitted.add(anchor)
+      topList.push({ syntheticRoot: anchor, sessionId: 'dsm-src:' + anchor })
+    }
+  }
+
+  // 空组防御（正常路径每组成员 ≥1，不产出空组）。
+  for (const [anchor, members] of groupsOf) {
+    if (!members.length) groupsOf.delete(anchor)
+  }
+  return { topList, branchGroupsOf: groupsOf, foldedCount, groupCount: groupsOf.size }
+}

@@ -11,7 +11,7 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { canDropOnWorkspace, dotStateFor, effectiveTitleOf, foldSubagents, noticeToastPlan, openSubagentToast, pathTail, sessionForNodes, shortId, starredOf, titleBackfillDecision, toastDurationFor, workspaceForNodes } from './logic.js'
+import { canDropOnWorkspace, dotStateFor, effectiveTitleOf, foldBranches, foldSubagents, noticeToastPlan, openSubagentToast, pathTail, sessionForNodes, shortId, starredOf, titleBackfillDecision, toastDurationFor, workspaceForNodes } from './logic.js'
 
 export const inject = ['slots']
 
@@ -53,6 +53,8 @@ const CSS = `
 .dsm-kid .dsm-kids{margin-left:8px;margin-top:6px}
 .dsm-kids-toggle{appearance:none;min-height:22px;padding:0 9px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-business-primary) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 10%,transparent);color:var(--dsw-alias-state-business-primary);border-radius:var(--dsm-radius-tag);font:inherit;font-size:11px;font-weight:500;cursor:pointer;flex:none;white-space:nowrap}
 .dsm-kids-toggle:hover{background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 18%,transparent)}
+.dsm-src-head{display:flex;align-items:center;gap:8px;padding:5px 9px;border:1px dashed var(--dsw-alias-border-l3);border-radius:var(--dsm-radius-ctl);font-size:12px;color:var(--dsw-alias-label-secondary)}
+.dsm-src-head .dsm-src-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsm-kid{display:flex;flex-direction:column;gap:6px;min-width:0}
 .dsm-kid-row{display:flex;align-items:center;gap:8px;min-width:0}
 .dsm-kid-name{flex:1 1 auto;min-width:0;font-size:12px;color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -399,6 +401,23 @@ function SessionPanel({ workspacesSvc }) {
   // sidebar-state 的官方 header 血缘字段（parentSession / origin），零解码。
   const [lineage, setLineage] = useState({})
   const [openKids, setOpenKids] = useState({})
+  // 3.7.0 分支聚拢（D2/D4）：组展开态持久化（照侧栏 dsm-subs-open-v1 模式，数组键）。
+  // 面板子代理折叠现状不持久化——不动它，避免两种语言互相牵连。
+  const [openBranches, setOpenBranches] = useState(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem('dsm-branch-open-v1') || '[]')
+      const o = {}
+      for (const k of Array.isArray(v) ? v : []) if (typeof k === 'string') o[k] = true
+      return o
+    } catch (e) { return {} }
+  })
+  const toggleBranch = (rootId) => setOpenBranches((prev) => {
+    const next = Object.assign({}, prev)
+    if (next[rootId]) delete next[rootId]
+    else next[rootId] = true
+    try { localStorage.setItem('dsm-branch-open-v1', JSON.stringify(Object.keys(next))) } catch (e) {}
+    return next
+  })
   const [groupByLineage, setGroupByLineage] = useState(() => initialPrefs.groupByLineage !== false)
 
   const loadLineage = () => postJSON('/archived-sessions/sidebar-state', {})
@@ -595,10 +614,27 @@ function SessionPanel({ workspacesSvc }) {
   // 血缘分组：把 origin === 'subagent' 的会话挂到父会话卡片下（可嵌套到孙
   // 代）。父会话不在当前列表里（被筛选掉 / 已删除 / 跨组）时子会话保持顶层，
   // 保证「搜得到就一定看得见」，不会因为折叠而消失。
-  const { topList, kidsOf, foldedCount } = useMemo(() => {
-    if (!groupByLineage) return { topList: list, kidsOf: new Map(), foldedCount: 0 }
-    return foldSubagents(list, lineage)
+  // 3.7.0 分支聚拢：先子代理折叠、后分支聚拢（foldBranches 的输入契约——顺序反了
+  // 会让分支父行的子代理变孤儿弹回顶层）。链式分支拍平进同一组；缺失父出
+  // 「来源：<短ID>」合成头；「一行不丢」由纯函数守恒不变量保证。
+  const { topList, kidsOf, foldedCount, branchGroupsOf, branchFolded, branchGroupCount } = useMemo(() => {
+    if (!groupByLineage) return { topList: list, kidsOf: new Map(), foldedCount: 0, branchGroupsOf: new Map(), branchFolded: 0, branchGroupCount: 0 }
+    const kids = foldSubagents(list, lineage)
+    const br = foldBranches(kids.topList, lineage)
+    return { topList: br.topList, kidsOf: kids.kidsOf, foldedCount: kids.foldedCount, branchGroupsOf: br.branchGroupsOf, branchFolded: br.foldedCount, branchGroupCount: br.groupCount }
   }, [list, lineage, groupByLineage])
+  // D5：query 命中折叠组内成员（或子代理）→ 渲染层强制展开——「看得见才搜得到」。
+  const matchIds = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase()
+    if (!needle) return null
+    return new Set((sessions || [])
+      .filter((item) => [effectiveTitleOf(item, dsmAuthoritativeTitles), item.sessionId, item.workspaceTitle, item.workspacePath]
+        .some((v) => String(v || '').toLocaleLowerCase().includes(needle)))
+      .map((i) => String(i.sessionId)))
+  }, [sessions, query])
+  const kidsHit = (parentId) => !!(matchIds && (kidsOf.get(String(parentId)) || []).some((k) => matchIds.has(String(k.sessionId))))
+  const branchHit = (rootId) => !!(matchIds && (branchGroupsOf.get(String(rootId)) || []).some((m) => matchIds.has(String(m.sessionId))))
+  const syntheticCount = groupByLineage ? topList.reduce((n, it) => n + (it && it.syntheticRoot ? 1 : 0), 0) : 0
 
   // 子代理折叠分两个部件，各自贴在它该在的位置：
   //   kidsBadge   —— 标题行内，紧跟会话标题，是「这个会话有 N 个子代理」的身份
@@ -608,7 +644,7 @@ function SessionPanel({ workspacesSvc }) {
     if (!groupByLineage) return null
     const kids = kidsOf.get(String(sessionId)) || []
     if (!kids.length) return null
-    const open = !!openKids[sessionId]
+    const open = !!openKids[sessionId] || kidsHit(sessionId)
     return (
       <button
         type="button"
@@ -641,7 +677,7 @@ function SessionPanel({ workspacesSvc }) {
 
   const renderKids = (parentId, depth) => {
     const kids = kidsOf.get(String(parentId)) || []
-    if (!kids.length || !openKids[parentId]) return null
+    if (!kids.length || !(openKids[parentId] || kidsHit(parentId))) return null
     return (
       <div className="dsm-kids">
         {kids.map((k) => (
@@ -661,6 +697,58 @@ function SessionPanel({ workspacesSvc }) {
               </span>
             </div>
             {(depth || 0) < 4 && renderKids(k.sessionId, (depth || 0) + 1)}
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  // 分支组头徽标 + 组列表：完整复用子代理折叠的语言（.dsm-kids-toggle / .dsm-kids
+  // 竖线），成员行照抄子代理子行——打开走 dsmOpenSessionById（成员各自的直接父，
+  // 官方地址契约），归档/删除同权。成员自己的 kidsBadge/分支 chip 保留在行内。
+  const branchGroupBadge = (sessionId) => {
+    if (!groupByLineage) return null
+    const members = branchGroupsOf.get(String(sessionId)) || []
+    if (!members.length) return null
+    const open = !!openBranches[sessionId] || branchHit(sessionId)
+    return (
+      <button
+        type="button"
+        className="dsm-kids-toggle"
+        aria-expanded={open}
+        title={(open ? '收起 ' : '展开 ') + members.length + ' 个分支会话'}
+        onClick={() => toggleBranch(sessionId)}
+      >
+        {open ? '▾' : '▸'} {members.length} 分支
+      </button>
+    )
+  }
+  const renderBranchGroup = (rootId) => {
+    const members = branchGroupsOf.get(String(rootId)) || []
+    if (!members.length || !(openBranches[rootId] || branchHit(rootId))) return null
+    return (
+      <div className="dsm-kids" aria-label="分支会话">
+        {members.map((k) => (
+          <div className="dsm-kid" key={k.sessionId}>
+            <div className="dsm-kid-row">
+              <span className="dsm-kid-name" title={k.title || k.sessionId}>{k.title || '(无标题)'}</span>
+              {branchBadge(k.sessionId)}
+              {emptyBadge(k.sessionId)}
+              {kidsBadge(k.sessionId)}
+              <span className="dsm-kid-meta">{k.archived ? '已归档' : '活动'}{fmtDate(k.createdAt) ? ` · ${fmtDate(k.createdAt)}` : ''}</span>
+              <span className="dsm-kid-acts">
+                <button type="button" className="archv-btn" disabled={busy !== null} title="切换到这个分支会话（设置面板挡着会话区，关掉即可看到）" onClick={async () => {
+                  const name = k.title || (String(k.sessionId).slice(0, 8) + '…')
+                  const li = lineage[String(k.sessionId)]
+                  const res = await dsmOpenSessionById(k.sessionId, (li && li.parentSession) || rootId)
+                  const msg = openSubagentToast(res, name, 'panel')
+                  showToast(msg.text, msg.kind)
+                }}>打开</button>
+                <button type="button" className="archv-btn" disabled={busy !== null} onClick={() => act(k.archived ? 'restore' : 'archive', k)}>{k.archived ? '恢复' : '归档'}</button>
+                <button type="button" className="archv-btn archv-del" disabled={busy !== null} title="移入回收站，可在回收站恢复" onClick={() => setDelTarget(k)}>删除</button>
+              </span>
+            </div>
+            {renderKids(k.sessionId, 1)}
           </div>
         ))}
       </div>
@@ -1201,8 +1289,8 @@ function SessionPanel({ workspacesSvc }) {
                 </div>
                 <div className="sess-field">
                   <label htmlFor="dsm-group">分组</label>
-                  <select id="dsm-group" value={groupByLineage ? 'lineage' : 'flat'} onChange={(e) => setGroupByLineage(e.target.value === 'lineage')} title="血缘分组：子代理折叠在父会话下；平铺：与 DSH 原生一致，全部并列">
-                    <option value="lineage">血缘（子代理折叠）</option>
+                  <select id="dsm-group" value={groupByLineage ? 'lineage' : 'flat'} onChange={(e) => setGroupByLineage(e.target.value === 'lineage')} title="血缘分组：子代理折叠、分支聚拢成组；平铺：与 DSH 原生一致，全部并列">
+                    <option value="lineage">血缘（折叠分组）</option>
                     <option value="flat">平铺（全部并列）</option>
                   </select>
                 </div>
@@ -1211,9 +1299,9 @@ function SessionPanel({ workspacesSvc }) {
                 {/* 一句话说清现状：有子代理折叠时，折叠数取代「共 X 个」尾巴
                     出现在同一句里；没有折叠时维持「显示 N 个，共 M 个」。 */}
                 <span className="sess-results-main">
-                  显示 {topList.length} 个会话
-                  {foldedCount
-                    ? `，另有 ${foldedCount} 个子代理折叠在父会话下`
+                  显示 {topList.length - syntheticCount} 个会话
+                  {foldedCount || branchFolded
+                    ? `，另有 ${[foldedCount ? `${foldedCount} 个子代理折叠在父会话下` : '', branchFolded ? `${branchFolded} 个分支聚成 ${branchGroupCount} 组` : ''].filter(Boolean).join('、')}`
                     : query || workspaceFilter !== 'all'
                       ? `，共 ${filter === 'archived' ? archivedList.length : filter === 'active' ? activeList.length : filter === 'starred' ? starredList.length : filter === 'empty' ? emptyList.length : sessions.length} 个`
                       : (topList.length !== list.length ? `，共 ${list.length} 个` : '')}
@@ -1310,6 +1398,28 @@ function SessionPanel({ workspacesSvc }) {
           ) : showSessionList ? (
             <div className="archv-list" role="list">
               {topList.map((it) => {
+                if (it && it.syntheticRoot) {
+                  // 缺失父的分支组头（合成行）：无勾选/星标/菜单/打开，不可导航——
+                  // 它代表的来源会话不在当前列表（被筛掉/已归档/已删除），只作归属展示。
+                  const root = String(it.syntheticRoot)
+                  const members = branchGroupsOf.get(root) || []
+                  const open = !!openBranches[root] || branchHit(root)
+                  const srcTitle = dsmAuthoritativeTitles.get(root)
+                  return (
+                    <div key={it.sessionId} className="dsm-src-head" role="listitem">
+                      <button
+                        type="button"
+                        className="dsm-kids-toggle"
+                        aria-expanded={open}
+                        title={(open ? '收起 ' : '展开 ') + members.length + ' 个分支会话（来源会话不在当前列表）'}
+                        onClick={() => toggleBranch(root)}
+                      >
+                        {open ? '▾' : '▸'} {members.length} 分支
+                      </button>
+                      <span className="dsm-src-name" title={root}>{'来源：' + (srcTitle || shortId(root))}</span>
+                    </div>
+                  )
+                }
                 const date = fmtDate(it.createdAt)
                 const expanded = openMove === it.sessionId
                 return (
@@ -1339,6 +1449,7 @@ function SessionPanel({ workspacesSvc }) {
                             {branchBadge(it.sessionId)}
                             {emptyBadge(it.sessionId)}
                             {kidsBadge(it.sessionId)}
+                            {branchGroupBadge(it.sessionId)}
                             <span className="archv-id" title={it.sessionId}>{shortId(it.sessionId)}</span>
                           </div>
                           <div className="archv-meta">
@@ -1351,6 +1462,7 @@ function SessionPanel({ workspacesSvc }) {
                       </div>
                     </div>
                     {groupByLineage && renderKids(it.sessionId, 0)}
+                    {groupByLineage && renderBranchGroup(it.sessionId)}
                     {expanded && (
                       <div className="mv-sheet" role="region" aria-label="移动到工作区">
                         <div className="mv-sheet-head">

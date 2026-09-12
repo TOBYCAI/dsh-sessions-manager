@@ -14,6 +14,8 @@ import { homedir } from 'node:os'
 import { rewriteFrame0CwdInMemory, scanZstdFrames } from './zstd-frame.js'
 import { createSessionMarkdownBuilder } from './markdown.js'
 import { createStarIndex } from './star-index.js'
+import { createTagIndex } from './tag-index.js'
+import { createSavedFilters } from './saved-filters.js'
 import { createPendingMoveStore } from './pending-moves.js'
 import { createMoveNoticeStore } from './move-notices.js'
 import { sweepStaleStateTemps } from './state-temp-sweep.js'
@@ -38,7 +40,8 @@ export const name = 'dsh-sessions-manager'
 export const inject = ['webServer', 'workspaceRegistry', 'sessionPersistence', 'sessionQuery', 'storageDomain']
 
 const MAX_TITLE = 80
-// 插件自有状态目录（星标 / 自动归档 / 标题索引共用）。与 star-index.js、auto-archive.js
+// 插件自有状态目录（星标 / 标签 / 保存筛选 / 自动归档 / 标题索引共用）。与 star-index.js、
+// tag-index.js、auto-archive.js
 // 的默认目录保持一致，环境变量同名，便于测试注入。
 const STATE_DIR = process.env.DSH_SESSIONS_MANAGER_STAR_DIR || join(homedir(), '.dsh', 'sessions-manager')
 // Recycle bin (回收站): normal deletes land here instead of being erased.
@@ -277,8 +280,9 @@ export function apply(ctx) {
       workspaceGone: !!(cwd && !ws),
       hasWorkspace: !!cwd,
     }
-    // sizeBytes / updatedAt 只在需要的路由（存储分析 / 自动归档）里带上：
-    // 它们本就来自 usage，附带输出对列表渲染无益。
+    // sizeBytes / updatedAt 只在需要的路由里带出（存储分析 / 自动归档 / 会话
+    // 列表——3.7.0 起列表也要：分支组时间回退键读 updatedAt）。它们本就来自
+    // usage，只是 payload 体积，不引入任何解码。
     if (exposeUsage && usage) {
       if (usage.sizeById && usage.sizeById.has(key)) base.sizeBytes = usage.sizeById.get(key)
       if (usage.mtimeById && usage.mtimeById.has(key)) base.updatedAt = usage.mtimeById.get(key)
@@ -579,6 +583,12 @@ export function apply(ctx) {
   // when the session is really gone (purge, or externally removed; the latter
   // is caught by gcStars during list builds).
   const stars = createStarIndex()
+  // 标签（3.7.0，schema v4）：与星标同型、同状态目录（tags.json）。纯用户元数据，
+  // rename/merge/delete 只重写标签文档，永不触碰会话本体（方案 §1.3 红线）。
+  const tags = createTagIndex()
+  // 保存的筛选（schema v1，saved-filters.json）：filters 为不透明 JSON，host
+  // 只限条数/名称/序列化体积，绝不解析其内容。
+  const savedFilters = createSavedFilters()
   // 待移动队列：会话被占用（DSH 打开中）时登记，等它释放后自动完成移动。
   // 见 src/pending-moves.js 的模块注释（0.1.5 单写者锁没有公共释放 API）。
   const pendingMoves = createPendingMoveStore()
@@ -597,6 +607,17 @@ export function apply(ctx) {
       const valid = new Set(validIds.map(String))
       const gone = store.starredSessionIds.filter((id) => !valid.has(id))
       if (gone.length) await stars.removeIds(gone)
+    } catch (e) { /* best-effort */ }
+  }
+
+  // 标签的会话侧引用同样要 GC：会话被外部移除（不在 list 基线里）时，
+  // assignments 里的键会变成永远列不出来的幽灵。与 gcStars 同挂点、同信任条件。
+  async function gcTags(validIds) {
+    try {
+      const store = await tags.read()
+      const valid = new Set(validIds.map(String))
+      const gone = Object.keys(store.assignments).filter((id) => !valid.has(id))
+      if (gone.length) await tags.removeIds(gone)
     } catch (e) { /* best-effort */ }
   }
 
@@ -876,6 +897,10 @@ export function apply(ctx) {
     // 状态目录清理 → `ENOTEMPTY: rmdir .../state`（全量测试里约 1/4 概率偶发失败）。
     // 而且"删除成功"不该早于状态落盘：进程恰好在此刻退出就会留下指向已删会话的星标。
     try { await stars.removeIds([sid]) } catch (e) { /* 星标清理失败不阻塞删除结果 */ }
+    // 标签 assignments 同理（S4 教训位）：清理必须 await、不得浮动写——purgeFromTrash
+    // 是唯一的彻底删除收口（trash/purge、trash/purge-many、到期清理都经过它），
+    // 在这里落盘即覆盖所有路径，且"删除成功"不早于状态落盘。
+    try { await tags.removeIds([sid]) } catch (e) { /* 标签清理失败不阻塞删除结果 */ }
     return { ok: true, purged: true }
   }
 
@@ -1467,12 +1492,28 @@ export function apply(ctx) {
       }
       return { items: archivedItems, usage }
     }
-    // Annotate stars; GC only when we have a trustworthy id baseline, so a
+    // Annotate stars & tags; GC only when we have a trustworthy id baseline, so a
     // failing sp.list() can never wipe the whole index.
     let starredSet = new Set()
-    try { starredSet = new Set((await stars.read()).starredSessionIds) } catch (e) {}
-    for (const it of items) it.starred = starredSet.has(String(it.sessionId))
+    let tagIdsBySession = new Map()
+    try {
+      starredSet = new Set((await stars.read()).starredSessionIds)
+      // Same one-shot read as stars: tag ids are plain metadata, no decoding.
+      // Filter dangling tagIds against the live definitions so a half-deleted
+      // tag can never leak into a rendered row.
+      const tagStore = await tags.read()
+      const knownTagIds = new Set(tagStore.tags.map((t) => t.id))
+      for (const [sid, list] of Object.entries(tagStore.assignments)) {
+        const kept = list.filter((id) => knownTagIds.has(id))
+        if (kept.length) tagIdsBySession.set(sid, kept)
+      }
+    } catch (e) {}
+    for (const it of items) {
+      it.starred = starredSet.has(String(it.sessionId))
+      it.tags = tagIdsBySession.get(String(it.sessionId)) || []
+    }
     if (headersOk) await gcStars(ids)
+    if (headersOk) await gcTags(ids)
     return { items, usage }
   }
 
@@ -2102,7 +2143,10 @@ export function apply(ctx) {
       path: '/archived-sessions/sessions',
       handler: async (req, res) => {
         try {
-          json(res, { items: await allSessionItems(), warmPending: warmPendingNow() })
+          // usage:true：updatedAt(=日志文件 mtime) 随行带出——3.7.0 分支聚拢的
+          // createdAt 缺失回退键（logic.branchTimeKey）。collectUsage 本就在
+          // allSessionItemsDetailed 内无条件执行，成本≈纯 payload 增加。
+          json(res, { items: await allSessionItems({ usage: true }), warmPending: warmPendingNow() })
         } catch (e) {
           json(res, { error: String((e && e.message) || e) }, 500)
         }
@@ -2121,11 +2165,145 @@ export function apply(ctx) {
           if ((!ids || ids.length === 0) && body && typeof body.sessionId === 'string') {
             ids = isSafeSessionId(body.sessionId) ? [body.sessionId] : null
           }
-          if (!ids || ids.length === 0) return json(res, { ok: false, error: 'missing sessionId' }, 400)
+          if (!ids || ids.length === 0) return json(res, { ok: false, code: 'DSM_STAR_SESSION_INVALID', error: 'missing sessionId' }, 400)
           const starredSessionIds = await stars.setStarred(ids, starred)
           json(res, { ok: true, starredSessionIds })
         } catch (e) {
-          json(res, { ok: false, error: String((e && e.message) || e) }, errorStatus(e))
+          // 3.7.0：补 code 字段（响应形状向后兼容，只增字段）——新路由全部带 code，
+          // 星标不应是例外。
+          json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
+        }
+      },
+    }))
+
+    // ---- Tags (标签, schema v4) — one route one action, same shape as star/set.
+    // Pure user metadata: these routes never create/modify/delete a session.
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/tags/list',
+      handler: async (req, res) => {
+        try {
+          const { tags: tagList, assignments } = await tags.list()
+          json(res, { ok: true, tags: tagList, assignments })
+        } catch (e) {
+          json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
+        }
+      },
+    }))
+
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/tags/create',
+      handler: async (req, res) => {
+        try {
+          const body = await readJsonBody(req)
+          const tag = await tags.create(body && body.name)
+          json(res, { ok: true, tag })
+        } catch (e) {
+          json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
+        }
+      },
+    }))
+
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/tags/rename',
+      handler: async (req, res) => {
+        try {
+          const body = await readJsonBody(req)
+          await tags.rename(body && body.id, body && body.name)
+          json(res, { ok: true })
+        } catch (e) {
+          json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
+        }
+      },
+    }))
+
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/tags/merge',
+      handler: async (req, res) => {
+        try {
+          const body = await readJsonBody(req)
+          await tags.merge(body && body.fromId, body && body.toId)
+          json(res, { ok: true })
+        } catch (e) {
+          json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
+        }
+      },
+    }))
+
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/tags/delete',
+      handler: async (req, res) => {
+        try {
+          const body = await readJsonBody(req)
+          await tags.removeTag(body && body.id)
+          json(res, { ok: true })
+        } catch (e) {
+          json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
+        }
+      },
+    }))
+
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/tags/set',
+      handler: async (req, res) => {
+        try {
+          const body = await readJsonBody(req)
+          const sid = body && body.sessionId
+          if (!isSafeSessionId(sid)) {
+            return json(res, { ok: false, code: 'DSM_TAG_SESSION_INVALID', error: 'missing/invalid sessionId' }, 400)
+          }
+          const assignments = await tags.setTags(sid, body && body.tagIds)
+          json(res, { ok: true, assignments })
+        } catch (e) {
+          json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
+        }
+      },
+    }))
+
+    // ---- Saved filters (保存筛选, schema v1) --------------------------------
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/filters/list',
+      handler: async (req, res) => {
+        try {
+          json(res, { ok: true, items: await savedFilters.list() })
+        } catch (e) {
+          json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
+        }
+      },
+    }))
+
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/filters/save',
+      handler: async (req, res) => {
+        try {
+          const body = await readJsonBody(req)
+          const item = await savedFilters.save(body && body.name, body && body.filters)
+          json(res, { ok: true, item })
+        } catch (e) {
+          json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
+        }
+      },
+    }))
+
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/filters/delete',
+      handler: async (req, res) => {
+        try {
+          const body = await readJsonBody(req)
+          const ids = body && Array.isArray(body.ids) ? body.ids : null
+          if (!ids || ids.length === 0) return json(res, { ok: false, code: 'DSM_FILTER_IDS_INVALID', error: 'missing ids' }, 400)
+          const removed = await savedFilters.remove(ids)
+          json(res, { ok: true, removed })
+        } catch (e) {
+          json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
         }
       },
     }))

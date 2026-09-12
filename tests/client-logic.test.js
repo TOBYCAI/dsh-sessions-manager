@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { authoritativeTitleForFirstPaint, canDropOnWorkspace, dotStateFor, effectiveTitleOf, foldSubagents, moveNoticeText, noticeToastPlan, openSubagentToast, pathTail, sessionForNodes, shortId, starredOf, titleBackfillDecision, TOAST_MAX_MS, TOAST_MIN_MS, toastDurationFor, workspaceForNodes } from '../src/client/logic.js'
+import { ascBranchTime, authoritativeTitleForFirstPaint, branchTimeKey, canDropOnWorkspace, dotStateFor, effectiveTitleOf, foldBranches, foldSubagents, moveNoticeText, noticeToastPlan, openSubagentToast, pathTail, sessionForNodes, shortId, starredOf, titleBackfillDecision, TOAST_MAX_MS, TOAST_MIN_MS, toastDurationFor, workspaceForNodes } from '../src/client/logic.js'
 
 // ---- dotStateFor：状态点语义 ----------------------------------------------
 // 历史回归：DSH 把 running 报成 ongoing（9766476）；done 在当前行上不能亮绿
@@ -289,5 +289,271 @@ test('noticeToastPlan：seen 过滤、展示最新 2 条、省略句合并、只
   assert.equal(noticeToastPlan(undefined, new Set()).text, null)
   assert.equal(noticeToastPlan([{ id: 'x', kind: 'weird', sessionId: 's' }], new Set()).text, null)
   assert.equal(noticeToastPlan([{ id: 'y', kind: 'moved' }], new Set()).text, null, '缺 sessionId 的畸形条目丢弃')
+})
+
+// —— T3（3.7.0）：foldBranches / branchTimeKey / ascBranchTime 分支聚拢 ————
+// 由 reports/search-b1-evidence 的已验证草稿（foldBranches.draft.mjs + t2.mjs
+// 断言族）收编而来。核心不变量是「守恒律」：任何一次调用，topList 中非合成
+// 行数 + foldedCount 必须等于输入 items.length——聚拢只许搬家，不许丢行。
+// 每族用例都跑一遍该断言。
+
+// 通用守恒断言：非合成行 = topList 里不带 syntheticRoot 标记的行（畸形占位行也算）。
+function assertConserved(r, items, label) {
+  const realTop = r.topList.filter((i) => !(i && i.syntheticRoot)).length
+  assert.equal(realTop + r.foldedCount, (items || []).length, '守恒律被破坏: ' + label)
+}
+// 便捷血缘表构造：{id: parentSession} → {id:{origin:null,parentSession,...}}
+function lin(rows) {
+  const out = {}
+  for (const [id, parent] of Object.entries(rows)) {
+    out[id] = typeof parent === 'string' ? { origin: null, parentSession: parent, delegationDepth: 1, empty: false } : parent
+  }
+  return out
+}
+
+// ---- A 族：基本分组 ---------------------------------------------------------
+
+test('A1: 同父两分支聚一组，父行留原位，组内按时间升序', () => {
+  const items = [{ sessionId: 'P' }, { sessionId: 'b1', createdAt: 2 }, { sessionId: 'x' }, { sessionId: 'b2', createdAt: 1 }]
+  const r = foldBranches(items, lin({ b1: 'P', b2: 'P' }))
+  assert.deepEqual(r.topList.map((i) => i.sessionId), ['P', 'x'])
+  assert.deepEqual(r.branchGroupsOf.get('P').map((i) => i.sessionId), ['b2', 'b1'])
+  assert.equal(r.foldedCount, 2)
+  assert.equal(r.groupCount, 1)
+  assertConserved(r, items, 'A1')
+})
+
+test('A2: 子代理绝不入组（foldSubagents 已先跑，本函数再锁一层）', () => {
+  const items = [{ sessionId: 'P' }, { sessionId: 's1' }]
+  const r = foldBranches(items, { s1: { origin: 'subagent', parentSession: 'P', delegationDepth: 1, empty: false } })
+  assert.deepEqual(r.topList.map((i) => i.sessionId), ['P', 's1'])
+  assert.equal(r.foldedCount, 0)
+  assert.equal(r.groupCount, 0)
+  assertConserved(r, items, 'A2')
+})
+
+test('A3: 空/null 输入与畸形 lineage 一律宽容、不抛错', () => {
+  for (const bad of [null, undefined]) {
+    const r = foldBranches(bad, bad)
+    assert.deepEqual(r.topList, [])
+    assert.equal(r.branchGroupsOf.size, 0)
+    assert.equal(r.foldedCount, 0)
+    assert.equal(r.groupCount, 0)
+    assertConserved(r, bad, 'A3/空')
+  }
+  // 数组含洞 / 非对象行：原样留在顶层，行不丢。
+  const items = [null, { sessionId: 'a' }, 42, undefined, { sessionId: 'b1' }]
+  const r = foldBranches(items, lin({ b1: 'GONE' }))
+  assert.equal(r.foldedCount, 1)
+  assertConserved(r, items, 'A3/洞')
+  // lineage 非对象（字符串/数组/数字/Map）：什么都不聚。
+  for (const junk of ['nope', [{ origin: null, parentSession: 'zz' }], 42, new Map()]) {
+    const r2 = foldBranches([{ sessionId: 'a' }], junk)
+    assert.deepEqual(r2.topList.map((i) => i.sessionId), ['a'])
+    assert.equal(r2.foldedCount, 0)
+  }
+})
+
+test('A4: 无分支时不产出任何（哪怕空的）组', () => {
+  const items = [{ sessionId: 'b1' }, { sessionId: 'b2' }]
+  const r = foldBranches(items, {}) // lineage 迟到：全顶层
+  assert.deepEqual(r.topList.map((i) => i.sessionId), ['b1', 'b2'])
+  assert.equal(r.groupCount, 0)
+  assert.equal(r.branchGroupsOf.size, 0)
+  const r2 = foldBranches(items, lin({ b1: null, b2: null })) // parentSession 缺失也不算分支
+  assert.equal(r2.groupCount, 0)
+  assertConserved(r2, items, 'A4')
+})
+
+test('A5: 链拍平——分支的分支全部进同一组（锚=链顶真实父）', () => {
+  const items = [{ sessionId: 'A' }, { sessionId: 'B', createdAt: 2 }, { sessionId: 'C', createdAt: 1 }]
+  const r = foldBranches(items, lin({ B: 'A', C: 'B' }))
+  assert.deepEqual(r.topList.map((i) => i.sessionId), ['A']) // 真实锚位置纹丝不动
+  assert.deepEqual(r.branchGroupsOf.get('A').map((i) => i.sessionId), ['C', 'B'])
+  assert.equal(r.groupCount, 1)
+  assertConserved(r, items, 'A5')
+})
+
+test('A6: 10 级深链整条拍平成单组，组内升序', () => {
+  const ids = Array.from({ length: 10 }, (_, i) => 'x' + i) // x9→x8→…→x0→ROOT
+  const items = [{ sessionId: 'ROOT' }, ...ids.map((id, i) => ({ sessionId: id, createdAt: i + 1 }))]
+  const table = lin(Object.fromEntries(ids.map((id, i) => [id, i === 0 ? 'ROOT' : ids[i - 1]])))
+  const r = foldBranches(items, table)
+  assert.deepEqual(r.topList.map((i) => i.sessionId), ['ROOT'])
+  assert.equal(r.groupCount, 1)
+  assert.equal(r.foldedCount, 10)
+  assert.deepEqual(r.branchGroupsOf.get('ROOT').map((i) => i.sessionId), ids.slice().sort((a, b) => Number(a.slice(1)) - Number(b.slice(1))))
+  assertConserved(r, items, 'A6')
+})
+
+test('A7: 自指不算分支（parentSession===自身 id 不聚）', () => {
+  const items = [{ sessionId: 'A' }]
+  const r = foldBranches(items, lin({ A: 'A' }))
+  assert.equal(r.foldedCount, 0)
+  assert.deepEqual(r.topList.map((i) => i.sessionId), ['A'])
+  assertConserved(r, items, 'A7')
+})
+
+// ---- B 族：组内排序 ----------------------------------------------------------
+
+test('B1: 组内恒升序，与调用方主排序方向无关（输入降序也一样）', () => {
+  const items = [
+    { sessionId: 'P' },
+    { sessionId: 'new', createdAt: 100 },
+    { sessionId: 'mid', createdAt: 50 },
+    { sessionId: 'old', createdAt: 1 },
+  ]
+  const r = foldBranches(items, lin({ new: 'P', mid: 'P', old: 'P' }))
+  assert.deepEqual(r.branchGroupsOf.get('P').map((i) => i.sessionId), ['old', 'mid', 'new'])
+  assert.deepEqual(r.topList.map((i) => i.sessionId), ['P'])
+  assertConserved(r, items, 'B1')
+})
+
+test('B2: updatedAt 回退 + 双缺以 sessionId 决胜；乱序输入组内输出逐位相等', () => {
+  // branchTimeKey：createdAt>0 优先 → updatedAt>0 → 0；非法值宽容。
+  assert.equal(branchTimeKey({ createdAt: 7, updatedAt: 3 }), 7)
+  assert.equal(branchTimeKey({ createdAt: 0, updatedAt: 3 }), 3)
+  assert.equal(branchTimeKey({ createdAt: -5, updatedAt: 9 }), 9)
+  assert.equal(branchTimeKey({ updatedAt: null }), 0)
+  assert.equal(branchTimeKey({}), 0)
+  assert.equal(branchTimeKey(null), 0)
+  assert.equal(branchTimeKey({ createdAt: 'not-a-number', updatedAt: 'also' }), 0)
+  // ascBranchTime：时间差优先，决胜 sessionId.localeCompare；双缺时纯 id 序。
+  assert.ok(ascBranchTime({ sessionId: 'x' }, { sessionId: 'x2' }) < 0, '双缺时间 → sessionId 决胜')
+  const rows = [
+    { sessionId: 'u10', updatedAt: 10 },
+    { sessionId: 'c5', createdAt: 5 },
+    { sessionId: 'c10', createdAt: 10 },
+  ]
+  assert.deepEqual(rows.slice().sort(ascBranchTime).map((x) => x.sessionId), ['c5', 'c10', 'u10'], 'updatedAt 回退键参与升序；回退键与 createdAt 同值时按 sessionId 决胜')
+  // 乱序输入两次输出逐位相等（成员序 + 顶层序 + 计数全部稳定）。
+  const table = lin({ b1: 'P', b2: 'P', b3: 'P' })
+  const itemsA = [{ sessionId: 'b3', createdAt: 3 }, { sessionId: 'b1', createdAt: 1 }, { sessionId: 'P' }, { sessionId: 'b2', createdAt: 2 }]
+  const itemsB = [{ sessionId: 'b2', createdAt: 2 }, { sessionId: 'P' }, { sessionId: 'b3', createdAt: 3 }, { sessionId: 'b1', createdAt: 1 }]
+  const rA = foldBranches(itemsA, table)
+  const rB = foldBranches(itemsB, table)
+  assert.deepEqual(rA.branchGroupsOf.get('P').map((i) => i.sessionId), ['b1', 'b2', 'b3'])
+  assert.deepEqual(rB.branchGroupsOf.get('P').map((i) => i.sessionId), rA.branchGroupsOf.get('P').map((i) => i.sessionId))
+  assert.deepEqual(rB.topList.map((i) => i.sessionId), rA.topList.map((i) => i.sessionId), '全员入组时顶层只剩真实锚，两次输出逐位相等')
+  assert.equal(rA.foldedCount, rB.foldedCount)
+  assertConserved(rA, itemsA, 'B2/A')
+  assertConserved(rB, itemsB, 'B2/B')
+})
+
+test('B3: 同毫秒靠 sessionId 决胜，组内序确定可复现', () => {
+  const items = [{ sessionId: 'P' }, { sessionId: 'z9', createdAt: 5 }, { sessionId: 'a1', createdAt: 5 }, { sessionId: 'm5', createdAt: 5 }]
+  const r = foldBranches(items, lin({ z9: 'P', a1: 'P', m5: 'P' }))
+  assert.deepEqual(r.branchGroupsOf.get('P').map((i) => i.sessionId), ['a1', 'm5', 'z9'])
+  assertConserved(r, items, 'B3')
+})
+
+// ---- C 族：父缺失（合成锚） ---------------------------------------------------
+
+test('C1: 两分支孤儿——合成头进 topList，成员全部移出，守恒', () => {
+  const items = [{ sessionId: 'z' }, { sessionId: 'b1', createdAt: 5 }, { sessionId: 'b2', createdAt: 3 }]
+  const r = foldBranches(items, lin({ b1: 'GONE', b2: 'GONE' }))
+  assert.deepEqual(r.topList.map((i) => i.sessionId), ['z', 'dsm-src:GONE'])
+  assert.equal(r.topList[1].syntheticRoot, 'GONE')
+  assert.deepEqual(r.branchGroupsOf.get('GONE').map((i) => i.sessionId), ['b2', 'b1'])
+  assert.equal(r.groupCount, 1)
+  assertConserved(r, items, 'C1')
+})
+
+test('C2: 合成头占「组内最早成员」在原列表中的下标（不是第一个碰到的成员）', () => {
+  // 原列表按主排序降序：late(9) 在前、early(3) 在后，中间隔着无关行 x。
+  const items = [{ sessionId: 'late', createdAt: 9 }, { sessionId: 'x' }, { sessionId: 'early', createdAt: 3 }]
+  const r = foldBranches(items, lin({ late: 'G', early: 'G' }))
+  assert.deepEqual(r.topList.map((i) => i.sessionId), ['x', 'dsm-src:G'], '头必须落在 early 原来的位置，而非首个成员 late 的位置')
+  assert.equal(r.topList[1].syntheticRoot, 'G')
+  assert.deepEqual(r.branchGroupsOf.get('G').map((i) => i.sessionId), ['early', 'late'])
+  assertConserved(r, items, 'C2')
+})
+
+test('C3: 单孤儿也出合成头（成员≥1 统一规则）', () => {
+  const items = [{ sessionId: 'solo', createdAt: 1 }]
+  const r = foldBranches(items, lin({ solo: 'GONE' }))
+  assert.deepEqual(r.topList.map((i) => i.sessionId), ['dsm-src:GONE'])
+  assert.deepEqual(r.branchGroupsOf.get('GONE').map((i) => i.sessionId), ['solo'])
+  assert.equal(r.foldedCount, 1)
+  assert.equal(r.groupCount, 1)
+  assertConserved(r, items, 'C3')
+})
+
+test('C4: 父是子代理、已被 foldSubagents 折走 → 分支按父缺失走合成头', () => {
+  const items = [{ sessionId: 'c1', createdAt: 1 }]
+  const table = { c1: { origin: null, parentSession: 'P-sub' }, 'P-sub': { origin: 'subagent', parentSession: 'REAL' } }
+  const r = foldBranches(items, table)
+  assert.deepEqual(r.topList.map((i) => i.sessionId), ['dsm-src:P-sub'])
+  assert.deepEqual(r.branchGroupsOf.get('P-sub').map((i) => i.sessionId), ['c1'])
+  assertConserved(r, items, 'C4')
+})
+
+test('C5: 链缺中间父（A缺失→B在→C）→ 合成锚 A，B、C 同组', () => {
+  const items = [{ sessionId: 'B', createdAt: 2 }, { sessionId: 'C', createdAt: 1 }]
+  const r = foldBranches(items, lin({ B: 'A', C: 'B' }))
+  assert.deepEqual(r.topList.map((i) => i.sessionId), ['dsm-src:A'])
+  assert.deepEqual(r.branchGroupsOf.get('A').map((i) => i.sessionId), ['C', 'B'])
+  assertConserved(r, items, 'C5')
+})
+
+// ---- D 族：环与病态血缘 --------------------------------------------------------
+
+test('D1: 互指环 A↔B 不聚拢，全留顶层', () => {
+  const items = [{ sessionId: 'A' }, { sessionId: 'B' }]
+  const r = foldBranches(items, lin({ A: 'B', B: 'A' }))
+  assert.deepEqual(r.topList.map((i) => i.sessionId), ['A', 'B'])
+  assert.equal(r.foldedCount, 0)
+  assert.equal(r.groupCount, 0)
+  assertConserved(r, items, 'D1')
+})
+
+test('D2: 环上的依附链（D→A，A↔B）也不聚，行不丢、顶层无重复', () => {
+  const items = [{ sessionId: 'A' }, { sessionId: 'B' }, { sessionId: 'D', createdAt: 1 }]
+  const r = foldBranches(items, lin({ A: 'B', B: 'A', D: 'A' }))
+  assert.equal(new Set(r.topList.map((i) => i.sessionId)).size, r.topList.length)
+  assertConserved(r, items, 'D2')
+  assert.equal(r.foldedCount, 0, '成环整链不聚：D 也留在顶层（原地保 chip）')
+})
+
+test('D3: 深链含尾部跳回环 → 判环不聚（visited+步数上限双保险）', () => {
+  // c0→c1→c2→c3→c0（c3 跳回 c0 成环），全在列表。
+  const items = [0, 1, 2, 3].map((i) => ({ sessionId: 'c' + i }))
+  const r = foldBranches(items, lin({ c0: 'c1', c1: 'c2', c2: 'c3', c3: 'c0' }))
+  assert.equal(r.foldedCount, 0)
+  assert.deepEqual(r.topList.map((i) => i.sessionId), ['c0', 'c1', 'c2', 'c3'])
+  assertConserved(r, items, 'D3')
+})
+
+// ---- E 族：收敛与迟到 ---------------------------------------------------------
+
+test('E1: 成员删光（不再出现在 items）→ 组与合成头一起消失', () => {
+  const items = [{ sessionId: 'x' }]
+  const r = foldBranches(items, lin({ gone1: 'GONE', gone2: 'GONE' }))
+  assert.deepEqual(r.topList.map((i) => i.sessionId), ['x'])
+  assert.equal(r.branchGroupsOf.size, 0)
+  assert.equal(r.groupCount, 0)
+  assertConserved(r, items, 'E1')
+})
+
+test('E2: 组里剩 1 个成员 → 组保留、foldedCount 记 1', () => {
+  const items = [{ sessionId: 'b2', createdAt: 3 }]
+  const r = foldBranches(items, lin({ b1: 'GONE', b2: 'GONE' }))
+  assert.deepEqual(r.branchGroupsOf.get('GONE').map((i) => i.sessionId), ['b2'])
+  assert.equal(r.foldedCount, 1)
+  assert.equal(r.groupCount, 1)
+  assert.deepEqual(r.topList.map((i) => i.sessionId), ['dsm-src:GONE'])
+  assertConserved(r, items, 'E2')
+})
+
+test('E3: lineage 迟到——第一次空表、第二次全表，两次都守恒且行为正确', () => {
+  const items = [{ sessionId: 'P' }, { sessionId: 'b1', createdAt: 2 }, { sessionId: 'b2', createdAt: 1 }]
+  const r1 = foldBranches(items, {})
+  assert.deepEqual(r1.topList.map((i) => i.sessionId), ['P', 'b1', 'b2'])
+  assert.equal(r1.foldedCount, 0)
+  assertConserved(r1, items, 'E3/迟到前')
+  const r2 = foldBranches(items, lin({ b1: 'P', b2: 'P' }))
+  assert.deepEqual(r2.topList.map((i) => i.sessionId), ['P'])
+  assert.deepEqual(r2.branchGroupsOf.get('P').map((i) => i.sessionId), ['b2', 'b1'])
+  assertConserved(r2, items, 'E3/到齐后')
 })
 
