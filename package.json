@@ -40,9 +40,7 @@
     "check:runtime": "node scripts/compat-runtime.mjs ${DSH_RUNTIME:-$HOME/.dsh/runtime}"
   },
   "devDependencies": {
-    "esbuild": "^0.25.0",
-    "@deepseek-ai/dsh-client-runtime": "0.1.1-rc.2",
-    "@deepseek-ai/dsh-host-apiproxy": "0.1.1-rc.2"
+    "esbuild": "^0.25.0"
   },
   "dsh": {
     "bundle": {
@@ -60,14 +58,14 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-client-ui-settings": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-workspace": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-session-persistence-jsonl": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-session-query": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-storage-domain": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-workspace": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.1.0-rc.6",
     "react": "^18.2.0"
   },
   "allowScripts": {
