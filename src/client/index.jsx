@@ -1276,7 +1276,7 @@ function SessionPanel({ workspacesSvc }) {
           )}
 
           {showSessionList && list.length === 0 ? (
-            <div className="archv-empty">{query || workspaceFilter !== 'all' ? '没有匹配的会话。请调整搜索词或工作区筛选。' : filter === 'archived' ? '目前没有归档会话。在“全部”里选中会话点“归档”即可收纳进来。' : filter === 'active' ? '目前没有活动会话。' : filter === 'starred' ? '还没有收藏的会话。点击会话左侧的星标即可收藏。' : filter === 'empty' ? '没有空白会话。新开会话还没产生内容时会归到这里，可在侧栏用「纯净视图」把它们一并折叠。' : '暂无可管理的会话。'}</div>
+            <div className="archv-empty">{query || workspaceFilter !== 'all' ? '没有匹配的会话。请调整搜索词或工作区筛选。' : filter === 'archived' ? '目前没有归档会话。在“全部”里选中会话点“归档”即可收纳进来。' : filter === 'active' ? '目前没有活动会话。' : filter === 'starred' ? '还没有收藏的会话。点击会话左侧的星标即可收藏。' : filter === 'empty' ? '没有空白会话。新开会话还没产生内容时会归到这里，侧栏会自动隐藏它们。' : '暂无可管理的会话。'}</div>
           ) : showSessionList ? (
             <div className="archv-list" role="list">
               {topList.map((it) => {
@@ -1411,7 +1411,7 @@ function SessionPanel({ workspacesSvc }) {
                                 </div>
                               )}
                               {d.lineage && (d.lineage.parentSessionId || (d.lineage.children && d.lineage.children.length > 0) || (d.lineage.subagents && d.lineage.subagents.length > 0)) && (
-                                <div className="dtl-sec"><div className="dtl-sec-t">血统</div>
+                                <div className="dtl-sec"><div className="dtl-sec-t">血缘</div>
                                   <div className="dtl-paths">
                                     {d.lineage.parentSessionId && <div>父会话: <code>{d.lineage.parentSessionId}</code></div>}
                                     {d.lineage.children && d.lineage.children.length > 0 && <div>子会话 ({d.lineage.children.length}): <code>{d.lineage.children.join(', ')}</code></div>}

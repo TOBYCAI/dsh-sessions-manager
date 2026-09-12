@@ -1652,7 +1652,7 @@ export function apply(ctx) {
   }
 
   // 聚合一条会话的详情（磁盘占用 / 轮次·步数·消息数 / 工具统计 / fetch /
-  // write/edit 文件 / 血统 parent/children/subagents）。live 与持久化会话都可读。
+  // write/edit 文件 / 血缘 parent/children/subagents）。live 与持久化会话都可读。
   // 所有统计对未知事件类型容错；fetch 与 files 做上限截断，files 用 stat 过滤
   // 磁盘上已不存在的路径，避免详情面板列出已删除文件。
   // 持久化会话走 inspectSession 分块折叠：大日志不再整本驻留内存（0.1.3-alpha
