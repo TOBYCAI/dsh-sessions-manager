@@ -1664,7 +1664,10 @@ const dsmLineage = new Map()
 // v3.6.2：host 预热是否还在途（sidebar-state/sessions 的 warmPending 旗标）。
 // 在途 → 侧栏轮询从 32s 台阶收紧到每拍（4s），标题/血缘一补齐就浮现；
 // 完成瞬间（true→false）触发一次性回调（面板自动补刷新，见 dsmOnWarmDone）。
+// T1（3.7.0）：空白精判并入同一「后台忙闲」信号——两者都落地才算完成，
+// 面板只补刷一次（而不是 warm/refine 各刷一遍）。
 let dsmWarmPending = false
+let dsmRefinePending = false
 let dsmTrashRetryTimer = null
 const dsmWarmDoneHooks = new Set()
 function dsmOnWarmDone(fn) {
@@ -1699,9 +1702,12 @@ async function dsmLoadTrashIds() {
       if (info && typeof info === 'object') dsmLineage.set(String(id), info)
     }
     // v3.6.2：预热完成的瞬间广播一次（面板挂自动补刷新；侧栏靠节拍恢复 32s）。
-    const wasPending = dsmWarmPending
+    // T1：旧 host 无 refinePending 字段 → !!undefined===false，节拍/广播语义
+    // 与 3.6.2 完全一致（新 client 绝不在旧 host 上疯轮询）。
+    const wasBusy = dsmWarmPending || dsmRefinePending
     dsmWarmPending = !!(r && r.warmPending)
-    if (wasPending && !dsmWarmPending) { try { for (const fn of dsmWarmDoneHooks) fn() } catch (e) { /* hook 出错不断主流程 */ } }
+    dsmRefinePending = !!(r && r.refinePending)
+    if (wasBusy && !(dsmWarmPending || dsmRefinePending)) { try { for (const fn of dsmWarmDoneHooks) fn() } catch (e) { /* hook 出错不断主流程 */ } }
     if (dsmRepaintDots) dsmRepaintDots()
   } catch (e) {
     /* keep last known set */
@@ -2536,8 +2542,8 @@ function installSidebarStatusDots() {
     if (typeof document !== 'undefined' && document.hidden) return
     // v3.6.2 C：预热在途时每拍（4s）都拉 sidebar-state，补齐结果立刻浮现；
     // 空闲时维持低频 32s（3.4.1 移除全表轮询的性能决策不回退——这里轮询的
-    // 是轻量 authority 路由，且仅在有活可补的窗口期加速）。
-    const cadence = dsmWarmPending ? 1 : 8
+    // 是轻量 authority 路由，且仅在有活可补的窗口期加速）。T1：精判同闸。
+    const cadence = (dsmWarmPending || dsmRefinePending) ? 1 : 8
     if (++dsmTrashTick % cadence === 0) dsmLoadTrashIds()
     paint()
   }

@@ -4,7 +4,7 @@ import { Readable } from 'node:stream'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { classifyLineage, isEmptyLogSize, isEmptyEventTypes, EMPTY_DECODE_LIMIT } from '../src/lineage.js'
+import { classifyLineage, emptyScanCandidate, isEmptyLogSize, isEmptyEventTypes, EMPTY_DECODE_LIMIT } from '../src/lineage.js'
 
 // ---- 纯函数：空白判定阈值（实测基线见 src/lineage.js 注释）------------------
 
@@ -48,32 +48,34 @@ test('isEmptyEventTypes classifies 0.1.3 lifecycle-only logs as empty', () => {
 
 // ---- 纯函数：血缘分类 ------------------------------------------------------
 
-test('classifyLineage separates subagent, fork branch, empty and ordinary sessions', () => {
-  // 子代理：官方 origin 标记 + 父会话 + 递归深度。
+test('classifyLineage reports structure only; empty is always null (unknown) since T1', () => {
+  // 子代理：官方 origin 标记 + 父会话 + 递归深度；empty=null 等后台精判。
   assert.deepEqual(
-    classifyLineage({ id: 's1', origin: 'subagent', parentSession: 'p1', delegationDepth: 2 }, 900),
-    { origin: 'subagent', parentSession: 'p1', delegationDepth: 2, empty: false },
+    classifyLineage({ id: 's1', origin: 'subagent', parentSession: 'p1', delegationDepth: 2 }),
+    { origin: 'subagent', parentSession: 'p1', delegationDepth: 2, empty: null },
   )
   // fork 分支：有 parentSession 但 origin 不是 subagent。
   assert.deepEqual(
-    classifyLineage({ id: 's2', parentSession: 'p0' }, 900),
-    { origin: null, parentSession: 'p0', delegationDepth: 0, empty: false },
+    classifyLineage({ id: 's2', parentSession: 'p0' }),
+    { origin: null, parentSession: 'p0', delegationDepth: 0, empty: null },
   )
-  // 空白：无血缘字段但日志只有 header。
-  assert.deepEqual(
-    classifyLineage({ id: 's3', cwd: '/w' }, 150),
-    { origin: null, parentSession: null, delegationDepth: 0, empty: true },
-  )
-  // 普通顶层非空会话：null（payload 保持最小）。
-  assert.equal(classifyLineage({ id: 's4', cwd: '/w' }, 900), null)
+  // T1 关键变化：体积法不再发布空白结论——小日志的普通会话返回 null，
+  // 空白条目只能由后台 refine 的**真解码判定**创建（误隐藏在结构上不可能）。
+  assert.equal(classifyLineage({ id: 's3', cwd: '/w' }), null)
+  assert.equal(classifyLineage({ id: 's4', cwd: '/w' }), null)
   // 异常输入不抛错。
-  assert.equal(classifyLineage(null, 900), null)
-  assert.equal(classifyLineage('x', 900), null)
+  assert.equal(classifyLineage(null), null)
+  assert.equal(classifyLineage('x'), null)
   // 非法 delegationDepth 归零而不是透传。
   assert.deepEqual(
-    classifyLineage({ id: 's5', origin: 'subagent', delegationDepth: -3 }, 900),
-    { origin: 'subagent', parentSession: null, delegationDepth: 0, empty: false },
+    classifyLineage({ id: 's5', origin: 'subagent', delegationDepth: -3 }),
+    { origin: 'subagent', parentSession: null, delegationDepth: 0, empty: null },
   )
+  // 候选门槛：legacy 无 sizeBytes → 永不候选（行为与 3.6.2 前一致）。
+  assert.equal(emptyScanCandidate(150), true)
+  assert.equal(emptyScanCandidate(EMPTY_DECODE_LIMIT), true)
+  assert.equal(emptyScanCandidate(EMPTY_DECODE_LIMIT + 1), false)
+  assert.equal(emptyScanCandidate(null), false)
 })
 
 // ---- 集成：sidebar-state 路由透出 lineage（handle-era 快照形态）--------------
@@ -150,21 +152,39 @@ before(async () => {
 
 after(async () => { await rm(root, { recursive: true, force: true }) })
 
-test('sidebar-state exposes lineage for subagent, fork and empty sessions only', async () => {
-  const { status, body } = await call('/archived-sessions/sidebar-state')
-  assert.equal(status, 200)
-  assert.deepEqual(body.lineage['sub-1'], { origin: 'subagent', parentSession: 'parent-1', delegationDepth: 1, empty: false })
-  assert.deepEqual(body.lineage['sub-2'], { origin: 'subagent', parentSession: 'sub-1', delegationDepth: 2, empty: false })
-  assert.deepEqual(body.lineage['fork-1'], { origin: null, parentSession: 'parent-1', delegationDepth: 0, empty: false })
-  assert.deepEqual(body.lineage['empty-1'], { origin: null, parentSession: null, delegationDepth: 0, empty: true })
-  // 普通顶层非空会话不产生条目。
-  assert.equal(body.lineage['parent-1'], undefined)
-  // 0.1.3 空会话：体积法漏判，事件类型精判捞回。
-  assert.deepEqual(body.lineage['ghost-empty'], { origin: null, parentSession: null, delegationDepth: 0, empty: true })
-  // 体积法假阳性（长 cwd 抬高阈值）被精判纠正，且无血缘结构的条目整个撤掉。
-  assert.equal(body.lineage['fp-1'], undefined)
-  // 既有字段不受影响。
-  assert.ok('titles' in body && 'trashedSessionIds' in body && 'purgedSessionIds' in body)
+test('sidebar-state answers with unknown empties first and refines them in the background (T1)', async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  const first = await call('/archived-sessions/sidebar-state')
+  assert.equal(first.status, 200)
+  // 首拍：结构条目立刻在场（这是本任务的全部意义——分支/子代理信息不再等解码），
+  // empty 一律 null（未知）。
+  assert.deepEqual(first.body.lineage['sub-1'], { origin: 'subagent', parentSession: 'parent-1', delegationDepth: 1, empty: null })
+  assert.deepEqual(first.body.lineage['sub-2'], { origin: 'subagent', parentSession: 'sub-1', delegationDepth: 2, empty: null })
+  assert.deepEqual(first.body.lineage['fork-1'], { origin: null, parentSession: 'parent-1', delegationDepth: 0, empty: null })
+  // 普通会话（空白与否都）未判定前不产生条目；精判能力在场时报忙。
+  assert.equal(first.body.lineage['empty-1'], undefined)
+  assert.equal(first.body.lineage['fp-1'], undefined)
+  assert.equal(first.body.lineage['parent-1'], undefined)
+  assert.equal(first.body.refinePending, true)
+  assert.ok('titles' in first.body && 'trashedSessionIds' in first.body && 'purgedSessionIds' in first.body)
+  // 收敛轮询；核心不变量：**任何一拍 fp-1（有内容的长 cwd 小日志）都从未被判空**
+  // ——体积法假阳性误隐藏整行的历史必须不可能回归。
+  let last = first.body
+  let sawFpEmpty = false
+  for (let i = 0; i < 120; i++) {
+    last = (await call('/archived-sessions/sidebar-state')).body
+    const f = last.lineage['fp-1']
+    if (f && f.empty === true) sawFpEmpty = true
+    if (last.lineage['empty-1'] && !last.refinePending) break
+    await sleep(25)
+  }
+  assert.equal(sawFpEmpty, false, 'fp-1 must never surface as empty in any beat')
+  assert.deepEqual(last.lineage['empty-1'], { origin: null, parentSession: null, delegationDepth: 0, empty: true }, '0.1.3 空白（体积法漏判）由精判捞回')
+  assert.deepEqual(last.lineage['ghost-empty'], { origin: null, parentSession: null, delegationDepth: 0, empty: true })
+  assert.deepEqual(last.lineage['sub-1'], { origin: 'subagent', parentSession: 'parent-1', delegationDepth: 1, empty: false })
+  assert.equal(last.lineage['fp-1'], undefined, '体积法假阳性纠正后不建条目')
+  assert.equal(last.lineage['parent-1'], undefined)
+  assert.equal(last.refinePending, false)
 })
 
 test('lineage-tree returns the recursive subagent-only tree and excludes forks', async () => {

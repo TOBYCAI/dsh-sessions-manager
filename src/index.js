@@ -20,11 +20,12 @@ import { aggregateStorage } from './storage-stats.js'
 import { createAutoArchiveStore, pickInactiveCandidates } from './auto-archive.js'
 import { createSessionMetaCache, fingerprintOf, persistFingerprintOf } from './session-meta-cache.js'
 import { createTitleIndexStore } from './title-persist-index.js'
+import { createEmptyScanStore } from './empty-scan-index.js'
 import { createPersistenceAdapter } from './compat/persistence.js'
 import { detectCapabilities, requireCapability } from './compat/capabilities.js'
 import { pathOwnsSession } from './path-guard.js'
 import { purgeSessionArtifacts, moveSessionToCwd } from './handle-era-ops.js'
-import { classifyLineage, isEmptyEventTypes, EMPTY_DECODE_LIMIT } from './lineage.js'
+import { classifyLineage, emptyScanCandidate, isEmptyEventTypes, EMPTY_DECODE_LIMIT } from './lineage.js'
 
 // 构建指纹：build.mjs 以 define 在编译期注入；直接以源码运行（测试）时为 'dev'。
 // 用途：capabilities 带出 buildStamp，一眼判断「运行中的 host 是不是这份构建」——
@@ -154,6 +155,10 @@ export function apply(ctx) {
   // 仍要全库解码。索引按同样的 (mtime, size) 指纹存解码结果，指纹没变的会话
   // 重启后也直接复用。见 src/title-persist-index.js。
   const titleIndex = createTitleIndexStore({ dir: TRASH_DIR, file: join(TRASH_DIR, 'title-index.json') })
+  // T1（3.7.0）：空白精判结论的持久层。只有**真解码成功**的判定落盘（unknown
+  // 与失败兜底都不是结论），sz 指纹 + 14 天 TTL 双闸门防「同尺寸原地改写」。
+  const emptyIndex = createEmptyScanStore({ dir: TRASH_DIR })
+  const EMPTY_VERDICT_TTL_MS = 14 * 24 * 3600 * 1000
 
   // P4：对「内存缓存未命中」的会话查持久索引，指纹一致才可信。
   // 返回 Map<id, meta>；调用方应把命中条目回填 metaCache 并从 missing 里剔除。
@@ -1565,15 +1570,48 @@ export function apply(ctx) {
         if (meta && meta.title) authorityTitleCache.set(id, String(meta.title))
       }
     }
-    // 血缘分类（issue #6）：结构分类（子代理 / fork 分支）来自 list snapshot
-    // 的 header，零解码；空白判定见下方 refineEmptyLineage（0.1.3 起体积法
-    // 失效，改为事件类型精判）。普通顶层非空会话不产生条目，payload 最小。
+    // 血缘分类（issue #6 + T1/3.7.0）：结构分类（子代理 / fork 分支）来自 list
+    // snapshot 的 header，零解码。空白（empty）是**三态**：null=未知（等后台
+    // refine 队列精判）、true/false=已判定（来自进程内缓存或 empty-scan 持久层，
+    // sz 指纹一致 + 14 天 TTL 内才可信）。请求路径零解码承诺由此完整成立：
+    // 超过解码上限的日志「必有内容」按事实直接给 false；legacy 无 sizeBytes
+    // 观测 → 永不候选、恒未知（与旧行为一致）。普通会话只在真判空时建条目，
+    // 「误隐藏」在结构上不可能来自体积法（该路径已整体退役）。
     const lineage = {}
+    const refineWanted = []
+    let emptyStore = null
+    try { emptyStore = await emptyIndex.entries() } catch (e) { emptyStore = null }
+    const nowTs = Date.now()
     for (const entry of entries) {
-      const info = classifyLineage(entry.header, entry.sizeBytes)
-      if (info) lineage[entry.id] = info
+      const id = String(entry.id)
+      const size = entry && Number.isFinite(entry.sizeBytes) ? entry.sizeBytes : null
+      const candidate = emptyScanCandidate(size)
+      let verdict = null
+      if (!candidate) {
+        if (size !== null) verdict = false // 超出解码上限 = 必有内容（事实，不是猜测）
+      } else {
+        const mem = emptyScanCache.get(id)
+        if (mem && mem.sizeBytes === size) {
+          verdict = !!mem.empty
+        } else {
+          const rec = emptyStore && emptyStore[id]
+          if (rec && rec.fingerprint === `sz:${size}` && nowTs - (rec.updatedAt || 0) <= EMPTY_VERDICT_TTL_MS) {
+            verdict = rec.empty === 1
+            emptyScanCache.set(id, { sizeBytes: size, empty: verdict })
+          }
+        }
+        if (verdict === null && refineCapable() && !refineQueue.has(id)) refineWanted.push({ id, sizeBytes: size })
+      }
+      const info = classifyLineage(entry.header)
+      if (info) lineage[id] = { origin: info.origin, parentSession: info.parentSession, delegationDepth: info.delegationDepth, empty: verdict }
+      else if (verdict === true) lineage[id] = { origin: null, parentSession: null, delegationDepth: 0, empty: true }
     }
-    await refineEmptyLineage(lineage, entries)
+    enqueueRefine(refineWanted)
+    // 缓存只保留「本轮仍是候选」的会话，防止 Map 随历史会话无限增长。
+    for (const key of emptyScanCache.keys()) {
+      const rec = emptyScanCache.get(key)
+      if (!rec || !emptyScanCandidate(rec.sizeBytes)) emptyScanCache.delete(key)
+    }
     return {
       titles: Object.fromEntries(authorityTitleCache),
       trashedSessionIds: store.items.map((item) => String(item.sessionId)),
@@ -1582,72 +1620,81 @@ export function apply(ctx) {
       // v3.6.2：还有预热/退避重试在途 → client 缩短轮询节拍，预热一完成就把
       // 补齐的标题送回（含面板自动刷新）。无预热 API 时恒 false，绝不假忙。
       warmPending: warmPendingNow(),
+      // T1：空白精判后台队列是否还有活。无精判能力（旧 runtime 无 inspect 通道）
+      // 时恒 false——永久 busy 会让 client 疯轮询，这是唯一现实的假忙陷阱。
+      refinePending: refinePendingNow(),
     }
   }
 
-  // 空会话判定缓存：id → { sizeBytes, empty }。日志没变（sizeBytes 相同）
-  // 就不重复解码——authority 会被侧栏高频轮询，缓存让它保持在近零成本。
+  // 空会话判定缓存（进程内）：id → { sizeBytes, empty }。日志没变（sizeBytes
+  // 相同）就不重复解码；T1 之后它只是 emptyIndex 持久层之上的热缓存。
   const emptyScanCache = new Map()
 
-  // 0.1.3 空会话精判（事件类型法，见 lineage.js）：体积阈值对新格式失效
-  // （头部扩容 + 恒存生命周期帧），改为对「压缩体积 ≤ EMPTY_DECODE_LIMIT」
-  // 的候选走官方 inspectSession 解码，按事件类型判定。超过上限的日志必有
-  // 内容，直接跳过（维持体积法/结构分类的结果）。解码失败按「非空」处理：
-  // 宁可漏判一个空会话，不能把有内容的会话错标成空。
-  // v3.6.2（分支标签延迟审计 #1 的速效半边）：旧实现把全部 ≤8KB 候选**串行**
-  // 解码在 sidebar-state 的请求路径里——冷启动（进程内缓存全空）时零解码成本
-  // 的血缘数据被这串慢解码挡在 return 之前，这正是「⑂ 分支」chip 晚出/32s 台阶
-  // 的直接门控。现在：并行限流 4 路 + 每请求预算 REFINE_BUDGET 条（超预算的
-  // 小日志下一拍继续，逐拍收敛；已缓存的条目零成本照常应用，不影响正确性）。
-  // 彻底解绑（精判挪进后台队列）是 3.7.0 的响应契约改造，不在热修范围。
-  const REFINE_BUDGET = 40
-  function applyEmptyScan(lineage, id, empty) {
-    if (empty) {
-      // 结构分类没建条目的普通会话也要补上（0.1.3 空会话 header 无血缘字段，
-      // classifyLineage 对它们返回 null）。
-      const info = lineage[id] || (lineage[id] = { origin: null, parentSession: null, delegationDepth: 0, empty: false })
-      info.empty = true
-    } else if (lineage[id]) {
-      // 旧体积法在小日志上的假阳性（如 alpha.2 单事件日志）在这里纠正；
-      // 纠正后若无任何血缘结构，条目整个撤掉，维持「普通会话不产生条目」。
-      const info = lineage[id]
-      info.empty = false
-      if (!info.origin && !info.parentSession) delete lineage[id]
-    }
+  // T1（3.7.0）：空白精判彻底移出请求路径。v3.6.2 的「预算+限流」只是过渡——
+  // 冷启动（缓存全空）时首拍仍要为精判解码，这正是「⑂ 分支」等零解码血缘被
+  // 挡在 return 之前的最后一块捆绑。现在：sidebar-state 先回三态数据，未判定
+  // 的候选进这条与 runWarm 同型的后台队列（REFINE_CHUNK=2、批间 setImmediate
+  // 让步、成功结论落盘、失败只在进程内按「非空」兜底且**不落盘**——宁可漏判
+  // 一个空白，不能把有内容的会话错标成空，也不能把失败固化成跨重启的结论）。
+  const REFINE_CHUNK = 2
+  const refineQueue = new Map()
+  let refineRunning = false
+  let refineKickTimer = null
+
+  function refineCapable() {
+    return !!persistence && typeof persistence.inspectSession === 'function'
   }
-  async function refineEmptyLineage(lineage, entries) {
-    if (!persistence || typeof persistence.inspectSession !== 'function') return
-    const limiter = createLimiter(4)
-    const todo = []
-    for (const entry of entries) {
-      const size = entry && Number.isFinite(entry.sizeBytes) ? entry.sizeBytes : null
-      if (size === null || size > EMPTY_DECODE_LIMIT) continue
-      const id = String(entry.id)
-      const scanned = emptyScanCache.get(id)
-      if (scanned && scanned.sizeBytes === size) { applyEmptyScan(lineage, id, scanned.empty); continue }
-      if (todo.length < REFINE_BUDGET) todo.push({ id, size })
+
+  function refinePendingNow() {
+    return !!(refineRunning || refineQueue.size)
+  }
+
+  function scheduleRefine() {
+    if (refineKickTimer || refineRunning || !refineQueue.size) return
+    refineKickTimer = setTimeout(() => { refineKickTimer = null; runRefine() }, 25)
+    if (typeof refineKickTimer.unref === 'function') refineKickTimer.unref()
+  }
+
+  function enqueueRefine(items) {
+    if (!items || !items.length || !refineCapable()) return
+    for (const { id, sizeBytes } of items) {
+      if (emptyScanCache.has(id) && emptyScanCache.get(id).sizeBytes === sizeBytes) continue
+      refineQueue.set(id, { sizeBytes })
     }
-    await Promise.all(todo.map(({ id, size }) => limiter(async () => {
-      let isEmpty = false
-      try {
-        const types = []
-        await persistence.inspectSession(id, { onEvents: (batch) => {
-          for (const ev of batch || []) if (types.length < 64) types.push(ev && ev.type)
-        } })
-        isEmpty = isEmptyEventTypes(types)
-      } catch (e) { isEmpty = false }
-      emptyScanCache.set(id, { sizeBytes: size, empty: isEmpty })
-      applyEmptyScan(lineage, id, isEmpty)
-    })))
-    // 缓存只保留「本轮仍参与判定」的会话：已彻底删除或日志膨胀超过解码
-    // 上限的条目不再有用，淘汰掉防止 Map 随历史会话无限增长。
-    const live = new Set()
-    for (const entry of entries) {
-      const size = entry && Number.isFinite(entry.sizeBytes) ? entry.sizeBytes : null
-      if (size !== null && size <= EMPTY_DECODE_LIMIT) live.add(String(entry.id))
-    }
-    for (const key of emptyScanCache.keys()) {
-      if (!live.has(key)) emptyScanCache.delete(key)
+    scheduleRefine()
+  }
+
+  async function runRefine() {
+    if (refineRunning) return
+    refineRunning = true
+    try {
+      while (refineQueue.size) {
+        const batch = [...refineQueue.entries()].slice(0, REFINE_CHUNK)
+        for (const [id] of batch) refineQueue.delete(id)
+        const persistBatch = {}
+        for (const [id, desc] of batch) {
+          try {
+            const types = []
+            await persistence.inspectSession(id, { onEvents: (b) => {
+              for (const ev of b || []) if (types.length < 64) types.push(ev && ev.type)
+            } })
+            const isEmpty = isEmptyEventTypes(types)
+            emptyScanCache.set(id, { sizeBytes: desc.sizeBytes, empty: isEmpty })
+            persistBatch[id] = { empty: isEmpty ? 1 : 0, fingerprint: `sz:${desc.sizeBytes}`, updatedAt: Date.now() }
+          } catch (e) {
+            // 失败兜底：非空（止 churn），但只进内存，不落盘。
+            emptyScanCache.set(id, { sizeBytes: desc.sizeBytes, empty: false })
+          }
+        }
+        if (Object.keys(persistBatch).length) {
+          try { await emptyIndex.merge(persistBatch) } catch (e) { /* 持久层只是加速器 */ }
+        }
+        // 批间让步：与 runWarm 同一纪律，绝不让后台精判独占宿主事件循环。
+        await new Promise((resolve) => setImmediate(resolve))
+      }
+    } finally {
+      refineRunning = false
+      if (refineQueue.size) scheduleRefine()
     }
   }
 
@@ -2004,6 +2051,7 @@ export function apply(ctx) {
           metaCache.invalidate(sid)
           // 彻底删除：持久标题索引里的条目一并清掉（issue #1 P4）。
           try { await titleIndex.remove([sid]) } catch (e) { /* 索引清理失败不阻塞删除结果 */ }
+            try { await emptyIndex.remove([sid]) } catch (e) { /* 同上 */ }
           json(res, out)
         } catch (e) {
           json(res, { ok: false, code: e && e.code, error: String((e && e.message) || e) }, errorStatus(e))
@@ -2021,7 +2069,7 @@ export function apply(ctx) {
           if (!ids || ids.length === 0) return json(res, { ok: false, error: 'missing sessionIds' }, 400)
           const results = []
           for (const sid of ids) {
-            try { results.push({ sessionId: sid, ok: true, ...(await purgeFromTrash(sid)) }); metaCache.invalidate(sid); await titleIndex.remove([sid]).catch(() => {}) }
+            try { results.push({ sessionId: sid, ok: true, ...(await purgeFromTrash(sid)) }); metaCache.invalidate(sid); await titleIndex.remove([sid]).catch(() => {}); await emptyIndex.remove([sid]).catch(() => {}) }
             catch (e) { results.push({ sessionId: sid, ok: false, error: String((e && e.message) || e) }) }
           }
           json(res, { ok: true, purged: results.filter((r) => r.ok).length, results })

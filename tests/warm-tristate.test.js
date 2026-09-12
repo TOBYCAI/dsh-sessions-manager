@@ -306,18 +306,20 @@ test('lineage-tree on a cold cache returns null titles and enqueues background w
 
 // —— refine 预算：sidebar-state 不被串行小日志解码挡在 return 前 ————————————
 
-test('refineEmptyLineage caps per-request decodes to the budget and converges progressively', async () => {
+test('refine never decodes on the request path; the background queue converges all candidates (T1 supersedes the 3.6.2 budget)', async () => {
   const ids = Array.from({ length: 45 }, (_, i) => `r${i}`)
   const b = await boot({ era: 'handle', ids, handleSize: 200 })
   try {
     const first = await b.call('/archived-sessions/sidebar-state', {})
     assert.equal(first.status, 200)
-    assert.ok(b.opens.length <= 40, `first pass must respect the refine budget, decoded ${b.opens.length}`)
-    assert.ok(b.opens.length >= 1, 'budget>0: some refinement does happen')
-    const mid = b.opens.length
-    await b.call('/archived-sessions/sidebar-state', {})
-    assert.ok(b.opens.length > mid, 'the next pass keeps refining the remainder')
-    assert.ok(b.opens.length <= 80)
+    assert.equal(b.opens.length, 0, 'T1: request path answers with unknown empties and zero decodes')
+    assert.equal(first.body.refinePending, true)
+    await waitFor(async () => {
+      const r = await b.call('/archived-sessions/sidebar-state', {})
+      return (!r.body.refinePending && Object.keys(r.body.lineage).length === 45) ? r : null
+    }, 'refine backlog never drains', 400)
+    // 全部解码过一次（events:[] → 真·空白），条目齐、旗标落。
+    assert.equal(b.opens.length, 45)
   } finally { await cleanup(b) }
 })
 
@@ -342,6 +344,7 @@ test('warmPending is a boolean on both list routes and settles false', async () 
     await sleep(80)
     const done = await b.call('/archived-sessions/sidebar-state', {})
     assert.equal(done.body.warmPending, false)
+    assert.equal(done.body.refinePending, false, 'legacy era (no sizeBytes) must never claim refine work')
     assert.ok(done.body.titles.w1, 'title is authoritative after warm')
   } finally { await cleanup(b) }
 })
