@@ -20,6 +20,7 @@
 
 - **统一面板**：顶部提供「全部 / 活动 / 已归档」三个常驻视图，低频的「已收藏 / 空白 / 回收站」收进行尾的箭头按钮，点按横向滑出展开（低频视图处于选中态时自动保持展开）；支持按标题、会话 ID、工作区搜索，按工作区筛选，并按创建时间或标题排序。结果行合并为一句说明，如「显示 5 个会话，另有 4 个子代理折叠在父会话下」。筛选栏下方的维护栏收纳「存储占用」与「自动归档」两个按需展开的工具，不占用视图位置。
 - **收藏（星标）**：会话行左侧常驻星标按钮，单击即收藏 / 取消（乐观更新、失败回滚）；「已收藏」视图与 DSH 的活动 / 归档状态正交、可叠加；收藏索引为插件自有 schema v3，不触碰 DSH 日志，会话被彻底删除时自动清理。
+- **标签与保存筛选**：给会话贴自定义标签（全局 ≤200、单会话 ≤10；支持重命名、合并、删除——**删除标签只删标签，绝不触碰会话**），并按标签筛选列表；「视图 + 工作区 + 排序 + 标签」的组合可保存为筛选预设（≤20 条）一键应用。标签与预设存在插件自有索引里（同星标索引纪律），跟随这台机器的 DSH 数据目录、不跟账号走——换机迁移属 3.10.0 备份范围。
 - **冷态标题同步**：侧栏使用日志中最新的 `session/title` 修正冷启动缓存，改名后的会话无需先打开即可显示新名称；冷启动大库里标题先留空、后台分批补齐，补齐后**已经在屏幕上的侧栏行和「⑂ 分支」标记的悬停说明会跟着自动更新**，不必等页面重建。
 - **侧栏跨工作区拖拽**：直接把会话拖到目标工作区标题即可切换工作区；目标高亮、同工作区拦截、失败反馈，并保留“更多 → 移动会话”作为键盘操作入口。
 - **归档 / 恢复**：归档把会话从侧栏隐藏；恢复取消归档并放回原工作区分组。
@@ -186,6 +187,13 @@ lib/client.js      预构建 client（ModuleLoader CJS handshake）
 | POST | `/archived-sessions/sidebar-state` | 返回侧栏权威标题、回收站 ID、永久删除墓碑、**血缘分层**（子代理 / 分支 / 空白标记）、`warmPending` / `refinePending`（标题预热、空白精判两条后台队列是否仍在途）与 `moveNotices`（排队移动终局通知，空则省略字段） |
 | POST | `/archived-sessions/lineage-tree` | 递归子代理树（面板血缘分组与侧栏折叠的数据源），已过滤回收站与墓碑 |
 | POST | `/archived-sessions/star/set` | 收藏 / 取消收藏 `{ sessionId 或 sessionIds, starred }` |
+| POST | `/archived-sessions/tags/list` | 标签定义 + 会话→标签映射 `{ tags, assignments }` |
+| POST | `/archived-sessions/tags/create` | 新建标签 `{ name }`（重名/超 200 拒绝，错误带 code） |
+| POST | `/archived-sessions/tags/rename` | 重命名 `{ id, name }`（id 不变） |
+| POST | `/archived-sessions/tags/merge` | 并入 `{ fromId, toId }`（去重合并后源标签消失） |
+| POST | `/archived-sessions/tags/delete` | 删除标签 `{ id }`（只删定义与映射，不碰会话） |
+| POST | `/archived-sessions/tags/set` | 全量设置某会话的标签 `{ sessionId, tagIds }` |
+| POST | `/archived-sessions/filters/list` / `save` / `delete` | 筛选预设 `{ name, filters }`（≤20；filters 为不透明载荷） |
 | GET | `/archived-sessions/export-md?sessionId=` | 单会话 Markdown 导出（人类可读对话记录） |
 | POST | `/archived-sessions/storage` | 存储占用聚合（按工作区排行 + 最大的会话）`{ topN }` |
 | POST | `/archived-sessions/auto-archive/settings` | 读取或更新自动归档策略 `{ inactiveDays, skipStarred }`；读取时惰性触发每日检查 |

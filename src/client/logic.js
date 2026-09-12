@@ -385,3 +385,80 @@ export function foldBranches(items, lineage) {
   }
   return { topList, branchGroupsOf: groupsOf, foldedCount, groupCount: groupsOf.size }
 }
+
+// —— T4（3.7.0）：标签筛选 + 已存筛选 ——
+// 标签与已存筛选是纯用户元数据：host 已把每会话的 tagId 列表挂到 /sessions 的
+// item.tags 上，筛选谓词只认这个字段。UI 接线全部在 index.jsx；这里收敛可测的
+// 判定与文案。
+
+/**
+ * 标签筛选（v1 单选）：tagId 为空串 / null / undefined 时原样返回输入列表
+ * （同一数组，不做拷贝）；否则返回 tags 数组含该 id 的子集。
+ * 为什么只做单选：多标签 AND 需要「已选标签集」这份额外界面状态，收益不抵
+ * 复杂度和与已存筛选快照格式的纠缠；v1 明确不追多选 AND，管理页的「合并」
+ * 已能覆盖主要的归并诉求。
+ * 宽容性：list 非数组按空表；条目缺 tags / tags 非数组 / id 是数字都不得抛错，
+ * 统一按「不匹配」处理（id 比较走字符串化，防 host 与本地 id 类型漂移）。
+ * @param list any（应为 /sessions 返回的条目数组，条目带 tags:[tagId]）
+ * @param tagId string|null|undefined ''/null 表示不按标签筛选
+ * @returns any[]
+ */
+export function applyTagFilter(list, tagId) {
+  const items = Array.isArray(list) ? list : []
+  if (!tagId) return items
+  const want = String(tagId)
+  return items.filter((item) => {
+    const tags = item && item.tags
+    return Array.isArray(tags) && tags.some((t) => String(t) === want)
+  })
+}
+
+// 删除标签的确认文案。红线：必须明说「只删标签，不会删除会话」——本插件一切
+// 标签操作都是纯元数据，但用户在「删除」字样上默认会联想到丢会话，含糊一次
+// 就再也骗不回来（见 star/标签路由注释的同一纪律）。单测锁关键词（copy-guard
+// 的替身：文案生成收敛为纯函数，防回归锁在 client-logic 测试里）。
+export function tagDeleteConfirm(name) {
+  return `删除标签「${String(name == null ? '' : name) || '(未命名)'}」？只删标签，不会删除会话；打过这个标签的会话只是失去它。`
+}
+
+// 已存筛选快照的字段域：视图与排序必须落在已知枚举里，否则应用一个不存在的
+// 视图会把面板带进没有 tab 的状态。workspace 只验「非空字符串」——工作区可能
+// 已删，删了也允许恢复（筛选结果为 0 行，用户可理解）；tag 允许 ''（=全部）。
+const SAVED_VIEWS = ['all', 'active', 'archived', 'starred', 'empty', 'trash']
+const SAVED_SORTS = ['newest', 'oldest', 'title']
+
+/**
+ * 把面板当前筛选态抓成可持久化的快照（/filters/save 的 filters 载荷）。
+ * 载荷字段名固定 {view, workspace, sort, tag}；host 侧对本体不透明（opaque
+ * payload），跨版本兼容全靠这里 + filterShapeFromSaved 两端夹逼。
+ * 入参任何字段非法都先回落默认再落盘，保存的永远是干净快照。
+ */
+export function filterSnapshotOf({ filter = 'all', workspaceFilter = 'all', sortBy = 'newest', tagFilter = '' } = {}) {
+  return {
+    view: SAVED_VIEWS.includes(filter) ? filter : 'all',
+    workspace: typeof workspaceFilter === 'string' && workspaceFilter ? workspaceFilter : 'all',
+    sort: SAVED_SORTS.includes(sortBy) ? sortBy : 'newest',
+    tag: typeof tagFilter === 'string' ? tagFilter : '',
+  }
+}
+
+/**
+ * 把一条已存筛选（/filters/list 的 item）还原成面板筛选形状；任何非法字段
+ * 回落默认，并在 degraded 数组里标注该字段名——UI 据此提示「部分条件已失效，
+ * 已按默认处理」，绝不静默吞掉。脏数据宽容：item/filters 缺失、为数组、字段
+ * 类型不对，统统不抛错。
+ * @returns {{view:string, workspace:string, sort:string, tag:string, degraded:string[]}}
+ */
+export function filterShapeFromSaved(item) {
+  const f = item && item.filters && typeof item.filters === 'object' && !Array.isArray(item.filters) ? item.filters : {}
+  const degraded = []
+  let view = typeof f.view === 'string' && SAVED_VIEWS.includes(f.view) ? f.view : 'all'
+  if (view === 'all' && f.view !== 'all') degraded.push('view')
+  let workspace = typeof f.workspace === 'string' && f.workspace ? f.workspace : 'all'
+  if (workspace === 'all' && f.workspace !== 'all') degraded.push('workspace')
+  let sort = typeof f.sort === 'string' && SAVED_SORTS.includes(f.sort) ? f.sort : 'newest'
+  if (sort === 'newest' && f.sort !== 'newest') degraded.push('sort')
+  let tag = typeof f.tag === 'string' ? f.tag : ''
+  if (tag === '' && f.tag !== '') degraded.push('tag')
+  return { view, workspace, sort, tag, degraded }
+}

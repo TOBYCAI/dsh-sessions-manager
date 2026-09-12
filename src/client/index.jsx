@@ -11,7 +11,7 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { canDropOnWorkspace, dotStateFor, effectiveTitleOf, foldBranches, foldSubagents, noticeToastPlan, openSubagentToast, pathTail, sessionForNodes, shortId, starredOf, titleBackfillDecision, toastDurationFor, workspaceForNodes } from './logic.js'
+import { applyTagFilter, canDropOnWorkspace, dotStateFor, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldSubagents, noticeToastPlan, openSubagentToast, pathTail, sessionForNodes, shortId, starredOf, tagDeleteConfirm, titleBackfillDecision, toastDurationFor, workspaceForNodes } from './logic.js'
 
 export const inject = ['slots']
 
@@ -49,6 +49,8 @@ const CSS = `
 .sess-fbtn-on{background:var(--dsw-alias-interactive-bg-active);color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l3)}
 .sess-tools{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin:0 0 8px}
 .sess-tools-4{grid-template-columns:repeat(auto-fit,minmax(132px,1fr))}
+/* T4 起搜索行有 5 个字段（搜索/工作区/标签/排序/分组）：收窄下限保证 800px 内一行排满。 */
+.sess-tools-5{grid-template-columns:repeat(auto-fit,minmax(124px,1fr))}
 .dsm-kids{display:flex;flex-direction:column;gap:6px;margin:10px 0 2px;margin-left:43px;padding-left:10px;border-left:2px solid var(--dsw-alias-border-l3)}
 .dsm-kid .dsm-kids{margin-left:8px;margin-top:6px}
 .dsm-kids-toggle{appearance:none;min-height:22px;padding:0 9px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-business-primary) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 10%,transparent);color:var(--dsw-alias-state-business-primary);border-radius:var(--dsm-radius-tag);font:inherit;font-size:11px;font-weight:500;cursor:pointer;flex:none;white-space:nowrap}
@@ -64,7 +66,9 @@ const CSS = `
 .sess-field{display:flex;flex-direction:column;gap:5px;min-width:0}
 .sess-field label{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary)}
 .sess-field input,.sess-field select{box-sizing:border-box;width:100%;min-height:36px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}
-.sess-results{display:flex;flex-direction:column;gap:1px;font-size:11px;color:var(--dsw-alias-label-tertiary);margin:0 0 4px}
+.sess-results{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-label-tertiary);margin:0 0 4px}
+/* T4 后计数行右侧挂了「保存筛选」控件组，正文独占左侧可收缩。 */
+.sess-results-main{flex:1 1 auto;min-width:0}
 .archv button:focus-visible,.archv input:focus-visible,.archv select:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
 .sess-batch{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 2px 4px;margin-bottom:4px}
 /* issue #7：勾选后批量操作栏吸顶——列表再长，操作按钮也一直在手边。 */
@@ -85,6 +89,10 @@ const CSS = `
 .archv-date{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;flex:none}
 .dsm-branch-chip{display:inline-flex;align-items:center;flex:none;min-height:22px;padding:0 9px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-success-primary) 45%,transparent);border-radius:var(--dsm-radius-tag);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 10%,transparent);color:var(--dsw-alias-state-success-primary);font-size:11px;font-weight:500;line-height:1;white-space:nowrap}
 .dsm-empty-chip{display:inline-flex;align-items:center;flex:none;min-height:22px;padding:0 9px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-tag);background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:500;line-height:1;white-space:nowrap}
+/* 3.7.0 T4 标签 chip 系：卡片标题行内、分支/空白 chip 之后。警示色系区别于
+   分支（绿）/空白（灰），名字超长省略号；+N 计数 chip 中性色。 */
+.dsm-tagchip{display:inline-flex;align-items:center;flex:none;max-width:9em;min-height:22px;padding:0 8px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary,#EAB308) 45%,transparent);border-radius:var(--dsm-radius-tag);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#EAB308) 10%,transparent);color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:500;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dsm-tagchip-more{max-width:none;color:var(--dsw-alias-label-tertiary);border-color:var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-subtle)}
 .archv-id{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px;color:var(--dsw-alias-label-tertiary);flex:none;margin-left:auto;white-space:nowrap}
 .archv-dot{color:var(--dsw-alias-border-l3);flex:none}
 .archv-check{width:15px;height:15px;accent-color:var(--dsw-alias-state-business-primary);flex:none;cursor:pointer}
@@ -116,7 +124,7 @@ const CSS = `
 /* 失败提示用警示色 + 加粗，并停留更久（需要用户读完去做下一步操作）。 */
 .archv-status-err{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary);font-weight:500}
 @media (prefers-reduced-motion:reduce){.archv-skel-card::after{animation:none}.archv-card,.archv-btn,.archv-star{transition:none}.archv-star:hover,.archv-star:active{transform:none}.archv-status,.archv-spin{animation:none}}
-@media (max-width:640px){.archv-card{flex-direction:column;align-items:stretch;gap:10px}.archv-actions{justify-content:flex-end}.sess-tools,.sess-tools-4{grid-template-columns:1fr}.sess-fbtn,.archv-btn{min-height:40px}.archv-star{width:30px;height:30px}.archv-star svg{width:22px;height:22px}.dsm-kids{margin-left:10px}.archv-titlerow{flex-wrap:wrap}.dsm-kid-row{flex-wrap:wrap}.dsm-kid-acts{margin-left:0}}
+@media (max-width:640px){.archv-card{flex-direction:column;align-items:stretch;gap:10px}.archv-actions{justify-content:flex-end}.sess-tools,.sess-tools-4,.sess-tools-5{grid-template-columns:1fr}.sess-fbtn,.archv-btn{min-height:40px}.archv-star{width:30px;height:30px}.archv-star svg{width:22px;height:22px}.dsm-kids{margin-left:10px}.archv-titlerow{flex-wrap:wrap}.dsm-kid-row{flex-wrap:wrap}.dsm-kid-acts{margin-left:0}}
 .mv-sheet{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:12px;margin-top:12px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-sheet);background:var(--dsw-alias-fill-subtle)}
 .mv-sheet-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .mv-sheet-title{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary);margin:0}
@@ -165,6 +173,25 @@ const CSS = `
 .dlg-title{font-size:15px;font-weight:650;color:var(--dsw-alias-label-primary);margin:0}
 .dlg-text{font-size:13px;line-height:1.6;color:var(--dsw-alias-label-secondary);margin:0;word-break:break-all}
 .dlg-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:2px}
+/* ---- T4 标签编辑/管理 sheet 与筛选保存控件（全部走 --dsw token） ---- */
+.dsm-taglist{display:flex;flex-direction:column;gap:2px;max-height:240px;overflow:auto}
+.dsm-tagcheck{display:flex;align-items:center;gap:8px;min-width:0;padding:5px 2px;font-size:12px;color:var(--dsw-alias-label-secondary);cursor:pointer;border-radius:7px}
+.dsm-tagcheck:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.dsm-tagcheck input{width:15px;height:15px;accent-color:var(--dsw-alias-state-business-primary);cursor:pointer;flex:none}
+.dsm-tagcheck-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsm-tagrow{display:flex;align-items:center;gap:8px;min-width:0;padding:6px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}
+.dsm-tagrow:last-child{border-bottom:none}
+.dsm-tag-name{flex:0 1 auto;min-width:0;font-size:12.5px;color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsm-tag-input{box-sizing:border-box;flex:1 1 auto;min-width:0;min-height:28px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);font-size:12px;font-family:inherit}
+.dsm-tag-input:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
+.dsm-tag-acts{display:flex;align-items:center;gap:6px;flex:none;margin-left:auto}
+.dsm-tag-acts .archv-btn{min-height:26px;padding:0 9px;font-size:11px}
+.dsm-tag-acts select{appearance:none;min-height:26px;padding:0 6px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-secondary);font-size:11px;font-family:inherit;max-width:10em}
+.dsm-fbar{display:flex;align-items:center;gap:6px;flex:none;margin-left:auto;flex-wrap:wrap}
+.dsm-fbar .archv-btn{min-height:24px;padding:0 8px;font-size:11px}
+.dsm-fbar select{appearance:none;min-height:24px;padding:0 6px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-secondary);font-size:11px;font-family:inherit;max-width:12em}
+.dsm-fbar input{box-sizing:border-box;min-width:9em;min-height:24px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);font-size:11px;font-family:inherit}
+@media (max-width:640px){.dsm-fbar{margin-left:0;width:100%;justify-content:flex-end}.dsm-tag-acts{margin-left:auto;flex-wrap:wrap;justify-content:flex-end}}
 `
 
 function fmtDate(iso) {
@@ -420,6 +447,322 @@ function SessionPanel({ workspacesSvc }) {
   })
   const [groupByLineage, setGroupByLineage] = useState(() => initialPrefs.groupByLineage !== false)
 
+  // —— T4（3.7.0）标签 + 已存筛选 ——
+  // 数据源纪律：卡片 chip、编辑 sheet 勾选、管理行用量、筛选下拉，一律以本
+  // 地 assignments 乐观态为准（tags/list 全量 + 每次 /tags/set 采纳服务端回
+  // 来的那一行）；/sessions 的 item.tags 只为筛选谓词供数，与 assignments
+  // 同一次乐观写里成对更新，两者不可能漂移。tags/list 失败 = tagsReady 假：
+  // chip 全隐藏、下拉与 ⋯ 菜单「标签」禁用（title 说原因），下次 refresh 再试。
+  // 刻意不把 tagFilter 写进 localStorage 偏好：重启后若标签数据不可用，一个
+  // 恢复出来的死筛选会把列表清成 0 行且无从解释——已存筛选功能才是持久组合
+  // 的正规去处。
+  const [tagDefs, setTagDefs] = useState([])
+  const [assignments, setAssignments] = useState({})
+  // 'loading'（首刷在途，中性文案）| 'ready' | 'failed'（tags/list 降级：chip
+  // 全隐藏、下拉与 ⋯「标签」禁用，title 分别说「加载中」/「加载失败」）。
+  const [tagsState, setTagsState] = useState('loading')
+  const tagsReady = tagsState === 'ready'
+  const [tagFilter, setTagFilter] = useState('')
+  const [savedFilters, setSavedFilters] = useState([])
+  const [openTags, setOpenTags] = useState(null)      // 展开标签编辑 sheet 的卡片 sessionId
+  const [openTagMgr, setOpenTagMgr] = useState(false) // 标签管理 sheet
+  const [tagBusy, setTagBusy] = useState(null)        // 单会话写锁（sessionId）
+  const [mgrBusy, setMgrBusy] = useState(false)       // 管理 sheet 写锁（全局一把）
+  const [cardTagName, setCardTagName] = useState('')  // 卡内 sheet「新建标签并贴上」输入
+  const [mgrTagName, setMgrTagName] = useState('')    // 管理 sheet 顶部新建输入
+  const [renamingTagId, setRenamingTagId] = useState(null)
+  const [renameTagValue, setRenameTagValue] = useState('')
+  const [mergeTarget, setMergeTarget] = useState({})  // fromId -> toId（行内 select 值）
+  const [saveFilterOpen, setSaveFilterOpen] = useState(false)
+  const [saveFilterName, setSaveFilterName] = useState('')
+  const [appliedSavedId, setAppliedSavedId] = useState('')
+  const tagFilterRef = useRef('')
+  tagFilterRef.current = tagFilter
+
+  // 标签 id → 名字（chip 渲染与 sheet 共用；死 id 查不到名字 → 渲染层跳过，
+  // 半删标签的幽灵绝不上屏）。
+  const tagMap = useMemo(() => new Map(tagDefs.map((t) => [String(t.id), String(t.name)])), [tagDefs])
+  // 用量统计：管理行上的「N 个会话」以 assignments 为准（与会话是否在当前
+  // 列表无关——已归档/被筛掉的打标会话也要算进用量）。
+  const tagUsage = useMemo(() => {
+    const m = {}
+    for (const ids of Object.values(assignments)) for (const id of (Array.isArray(ids) ? ids : [])) m[String(id)] = (m[String(id)] || 0) + 1
+    return m
+  }, [assignments])
+  // 禁用态统一说人话：区分「还在加载」与「加载失败」两种 tagsReady=false。
+  const tagsBlockedTitle = tagsState === 'failed'
+    ? '标签数据未能加载，暂时无法使用标签功能（重新打开设置面板可重试）'
+    : '标签数据加载中，稍候即可使用'
+
+  // tags/list：与 pending-moves 同一先例——尽力而为的旁路读取，失败降级空表
+  // 并置 tagsState='failed'，绝不打扰列表主流程的错误条。
+  const loadTags = () => postJSON('/archived-sessions/tags/list', {})
+    .then((r) => {
+      const defs = (r && Array.isArray(r.tags)) ? r.tags : []
+      setTagDefs(defs)
+      setAssignments((r && r.assignments && typeof r.assignments === 'object' && !Array.isArray(r.assignments)) ? r.assignments : {})
+      setTagsState('ready')
+      // 死筛选自愈：标签被别的窗口删了，刷新后不能把列表永久卡在 0 行。
+      const cur = tagFilterRef.current
+      if (cur && !defs.some((t) => String(t.id) === cur)) setTagFilter('')
+    })
+    .catch(() => {
+      setTagDefs([]); setAssignments({}); setTagsState('failed')
+      if (tagFilterRef.current) setTagFilter('')
+    })
+  const loadSavedFilters = () => postJSON('/archived-sessions/filters/list', {})
+    .then((r) => setSavedFilters((r && Array.isArray(r.items)) ? r.items : []))
+    .catch(() => setSavedFilters([]))
+
+  // 全量替换某会话的标签：先双写本地（assignments + 该行 item.tags），失败
+  // 双双回滚；成功则采纳服务端响应里这一行的最终值（并发冲突以服务端为准，
+  // 其它行不动——它们可能正被别的在途乐观操作编辑，下一次 refresh 全量收敛）。
+  const setSessionTags = async (sid, nextIds) => {
+    const key = String(sid)
+    const prev = Array.isArray(assignments[key]) ? assignments[key].slice() : []
+    if (prev.length === nextIds.length && prev.every((t, i) => String(t) === String(nextIds[i]))) return
+    const writeLocal = (ids) => {
+      setAssignments((a) => {
+        const n = Object.assign({}, a)
+        if (ids.length) n[key] = ids
+        else delete n[key]
+        return n
+      })
+      setSessions((s) => s && s.map((x) => (String(x.sessionId) === key ? Object.assign({}, x, { tags: ids }) : x)))
+    }
+    writeLocal(nextIds)
+    setTagBusy(key)
+    try {
+      const r = await postJSON('/archived-sessions/tags/set', { sessionId: sid, tagIds: nextIds })
+      const row = r && r.assignments && Array.isArray(r.assignments[key]) ? r.assignments[key].map(String) : nextIds.map(String)
+      writeLocal(row)
+    } catch (e) {
+      writeLocal(prev)
+      showToast('标签设置失败：' + String((e && e.message) || e), 'err')
+    } finally {
+      setTagBusy(null)
+    }
+  }
+
+  // 勾选 toggle：从当前本地行推导全量替换列表（>10 个时服务端 409，回滚 +
+  // 报错——v1 不在前端复刻上限校验，规则只有服务端一份事实源）。
+  const toggleTagFor = (sid, tagId) => {
+    if (tagBusy !== null) return
+    const key = String(sid)
+    const cur = Array.isArray(assignments[key]) ? assignments[key] : []
+    const has = cur.some((t) => String(t) === String(tagId))
+    const next = has ? cur.filter((t) => String(t) !== String(tagId)) : cur.concat(String(tagId))
+    setSessionTags(sid, next)
+  }
+
+  // 卡内「新建标签并贴上」：create 成功即刻并入 tagDefs（chip 无需等整表刷新），
+  // 再走同一 setSessionTags 乐观通道（写锁交给它收尾）；create 失败（重名/非法/
+  // 超限）只 toast，服务端中文错误信息原样转达。
+  const createTagAndAttach = async (sid) => {
+    const name = cardTagName.trim()
+    if (!name || tagBusy !== null) return
+    setTagBusy(String(sid))
+    let fresh = null
+    try {
+      const r = await postJSON('/archived-sessions/tags/create', { name })
+      if (r && r.tag && r.tag.id != null) fresh = r.tag
+      else throw new Error('服务端未返回新标签')
+    } catch (e) {
+      showToast('新建标签失败：' + String((e && e.message) || e), 'err')
+    }
+    if (!fresh) { setTagBusy(null); return }
+    setTagDefs((d) => (d.some((t) => String(t.id) === String(fresh.id)) ? d : d.concat(fresh)))
+    const cur = Array.isArray(assignments[String(sid)]) ? assignments[String(sid)].slice() : []
+    setCardTagName('')
+    await setSessionTags(sid, cur.concat(String(fresh.id)))
+  }
+
+  // —— 标签管理 sheet 的四个写操作 ——
+  // 全部本地镜像 + toast（merge/delete 会顺带自愈筛选态：删掉正在筛的标签 →
+  // 复位「全部」；并入 → 筛选跟着换成目标标签），下一次 refresh 全量收敛。
+
+  const createTag = async () => {
+    const name = mgrTagName.trim()
+    if (!name || mgrBusy) return
+    setMgrBusy(true)
+    try {
+      const r = await postJSON('/archived-sessions/tags/create', { name })
+      if (r && r.tag && r.tag.id != null) {
+        const fresh = r.tag
+        setTagDefs((d) => (d.some((t) => String(t.id) === String(fresh.id)) ? d : d.concat(fresh)))
+        setMgrTagName('')
+      }
+    } catch (e) {
+      showToast('新建标签失败：' + String((e && e.message) || e), 'err')
+    } finally {
+      setMgrBusy(false)
+    }
+  }
+
+  const commitTagRename = async (tag) => {
+    const name = renameTagValue.trim()
+    if (!name || mgrBusy) { setRenamingTagId(null); return }
+    if (name === tag.name) { setRenamingTagId(null); return }
+    setMgrBusy(true)
+    try {
+      await postJSON('/archived-sessions/tags/rename', { id: tag.id, name })
+      setTagDefs((d) => d.map((t) => (String(t.id) === String(tag.id) ? Object.assign({}, t, { name }) : t)))
+      setRenamingTagId(null)
+    } catch (e) {
+      showToast('重命名失败：' + String((e && e.message) || e), 'err')
+    } finally {
+      setMgrBusy(false)
+    }
+  }
+
+  const deleteTag = async (tag) => {
+    if (mgrBusy) return
+    if (!window.confirm(tagDeleteConfirm(tag.name))) return
+    setMgrBusy(true)
+    try {
+      await postJSON('/archived-sessions/tags/delete', { id: tag.id })
+      const gone = String(tag.id)
+      setTagDefs((d) => d.filter((t) => String(t.id) !== gone))
+      setAssignments((a) => {
+        const n = {}
+        for (const [sid, ids] of Object.entries(a)) {
+          const kept = (Array.isArray(ids) ? ids : []).filter((id) => String(id) !== gone)
+          if (kept.length) n[sid] = kept
+        }
+        return n
+      })
+      // item.tags 同步剔除死 id（筛选谓词读它）——否则被删标签的行仍留在筛选
+      // 结果里，与 chip 消失自相矛盾。
+      setSessions((s) => s && s.map((x) => {
+        const curT = Array.isArray(x.tags) ? x.tags : []
+        if (!curT.some((id) => String(id) === gone)) return x
+        return Object.assign({}, x, { tags: curT.filter((id) => String(id) !== gone) })
+      }))
+      // 红线：删掉正在筛选的标签 → 自动复位「全部」，绝不留下一个 0 行死筛选。
+      if (tagFilterRef.current === gone) setTagFilter('')
+      setMergeTarget((m) => { const n = Object.assign({}, m); delete n[gone]; return n })
+    } catch (e) {
+      showToast('删除标签失败：' + String((e && e.message) || e), 'err')
+    } finally {
+      setMgrBusy(false)
+    }
+  }
+
+  const mergeTag = async (from) => {
+    const toId = mergeTarget[String(from.id)]
+    if (!toId || mgrBusy) return
+    setMgrBusy(true)
+    try {
+      await postJSON('/archived-sessions/tags/merge', { fromId: from.id, toId })
+      const gone = String(from.id)
+      setTagDefs((d) => d.filter((t) => String(t.id) !== gone))
+      // 本地镜像 = 宿主语义：成员行改挂目标标签并按 id 去重（同会话两标都打
+      // 时并完只剩一个），目标行不动。
+      setAssignments((a) => {
+        const n = {}
+        for (const [sid, ids] of Object.entries(a)) {
+          const kept = []
+          const seen = new Set()
+          for (const id of (Array.isArray(ids) ? ids : [])) {
+            const v = String(id) === gone ? String(toId) : String(id)
+            if (seen.has(v)) continue
+            seen.add(v)
+            kept.push(v)
+          }
+          if (kept.length) n[sid] = kept
+        }
+        return n
+      })
+      if (tagFilterRef.current === gone) setTagFilter(String(toId))
+      setMergeTarget((m) => { const n = Object.assign({}, m); delete n[gone]; return n })
+      // 与 assignments 同步镜像 item.tags（筛选谓词读它）：含 fromId 的行改挂
+      // 目标标签并按 id 去重——否则「按目标标签筛选」要等整表刷新才命中。
+      setSessions((s) => s && s.map((x) => {
+        const curT = Array.isArray(x.tags) ? x.tags : []
+        if (!curT.some((id) => String(id) === gone)) return x
+        const nextT = []
+        const seenT = new Set()
+        for (const id of curT) {
+          const v = String(id) === gone ? String(toId) : String(id)
+          if (seenT.has(v)) continue
+          seenT.add(v)
+          nextT.push(v)
+        }
+        return Object.assign({}, x, { tags: nextT })
+      }))
+      showToast(`已并入「${tagMap.get(String(toId)) || '目标标签'}」`)
+    } catch (e) {
+      showToast('合并标签失败：' + String((e && e.message) || e), 'err')
+    } finally {
+      setMgrBusy(false)
+    }
+  }
+
+  // —— 已存筛选：保存 / 应用 / 删除 ——
+  // payload 形状转换全部走 logic 的纯函数对（snapshotOf 落盘、shapeFromSaved
+  // 读回），往返等值有单测锁着；非法字段回落默认并在 toast 里说清。
+
+  const saveCurrentFilter = async () => {
+    const name = saveFilterName.trim()
+    if (!name || mgrBusy) return
+    setMgrBusy(true)
+    try {
+      const r = await postJSON('/archived-sessions/filters/save', {
+        name,
+        filters: filterSnapshotOf({ filter, workspaceFilter, sortBy, tagFilter }),
+      })
+      if (r && r.item) setSavedFilters((l) => (l.some((x) => String(x.id) === String(r.item.id)) ? l : l.concat(r.item)))
+      setSaveFilterOpen(false)
+      setSaveFilterName('')
+      showToast(`已保存筛选「${(r && r.item && r.item.name) || name}」`)
+    } catch (e) {
+      // 409 重名 / 409 上限 / 400 名字无效：服务端中文消息原样转达。
+      showToast('保存筛选失败：' + String((e && e.message) || e), 'err')
+    } finally {
+      setMgrBusy(false)
+    }
+  }
+
+  const applySavedFilter = (id) => {
+    const key = String(id)
+    setAppliedSavedId(key)
+    if (!key) return
+    const item = savedFilters.find((x) => String(x.id) === key)
+    if (!item) return
+    const shape = filterShapeFromSaved(item)
+    // 形状合法但指向已消失的标签 / 工作区：纯函数无从得知活数据，这里对账
+    // ——标签不可用（未加载或已删）就复位「全部」，避免应用出 0 行死筛选；
+    // 工作区即便被删也保留原值（列表空是诚实结果，兜底 option 说明状态）。
+    const tagUnavailable = !!shape.tag && (!tagsReady || !tagMap.has(shape.tag))
+    const degraded = shape.degraded.slice()
+    if (tagUnavailable) degraded.push('tag')
+    setFilter(shape.view)
+    clearSel()
+    setConfirmBatch(false)
+    if (shape.view === 'starred' || shape.view === 'empty' || shape.view === 'trash') setMoreOpen(true)
+    setWorkspaceFilter(shape.workspace)
+    setSortBy(shape.sort)
+    setTagFilter(tagUnavailable ? '' : shape.tag)
+    if (degraded.length) {
+      const labels = { view: '视图', workspace: '工作区', sort: '排序', tag: '标签' }
+      showToast(`已应用筛选「${item.name}」，但其中 ${[...new Set(degraded)].map((k) => labels[k] || k).join('、')} 条件已失效并回落默认`, 'err')
+    }
+  }
+
+  const deleteSavedFilter = async (id) => {
+    if (mgrBusy) return
+    setMgrBusy(true)
+    try {
+      await postJSON('/archived-sessions/filters/delete', { ids: [id] })
+      setSavedFilters((l) => l.filter((x) => String(x.id) !== String(id)))
+      if (String(appliedSavedId) === String(id)) setAppliedSavedId('')
+    } catch (e) {
+      showToast('删除已存筛选失败：' + String((e && e.message) || e), 'err')
+    } finally {
+      setMgrBusy(false)
+    }
+  }
+
   const loadLineage = () => postJSON('/archived-sessions/sidebar-state', {})
     .then((r) => setLineage((r && r.lineage) || {}))
     .catch(() => {})
@@ -457,6 +800,10 @@ function SessionPanel({ workspacesSvc }) {
         loadLineage()
         if (!targetWs && works.items && works.items.length) setTargetWs(works.items[0].workspaceId)
         loadTrash()
+        // T4：标签与已存筛选的旁路读取（与 pending-moves 同一先例：失败降级，
+        // 不进主错误条）。
+        loadTags()
+        loadSavedFilters()
         postJSON('/archived-sessions/pending-moves', {}).then((q) => setPendingQueue((q && q.items) || [])).catch(() => {})
         // 会话集合变了：面板开着就同步刷新；关着则只标脏，等展开时再刷。
         if (storageOpen) loadStorage()
@@ -593,8 +940,11 @@ function SessionPanel({ workspacesSvc }) {
   const list = useMemo(() => {
     if (filter === 'trash') return []
     const base = filter === 'archived' ? archivedList : filter === 'active' ? activeList : filter === 'starred' ? starredList : filter === 'empty' ? emptyList : sessions || []
+    // T4 标签筛选（单选，v1 不追多选 AND——理由见 logic.applyTagFilter）：在
+    // 搜索/工作区之前先按标签收敛；''/未就绪时谓词原样返回，行为与旧版一致。
+    const tagPassed = applyTagFilter(base, tagsReady ? tagFilter : '')
     const needle = query.trim().toLocaleLowerCase()
-    const filtered = base.filter((item) => {
+    const filtered = tagPassed.filter((item) => {
       if (workspaceFilter !== 'all' && (item.workspacePath || '') !== workspaceFilter) return false
       if (!needle) return true
       // v3.6.2 #6：占位标题的会话按「有效标题」（列表值 → 侧栏权威回落）匹配，
@@ -606,7 +956,7 @@ function SessionPanel({ workspacesSvc }) {
       if (sortBy === 'title') return effectiveTitleOf(a, dsmAuthoritativeTitles).localeCompare(effectiveTitleOf(b, dsmAuthoritativeTitles), 'zh-CN')
       return Number(b.createdAt || 0) - Number(a.createdAt || 0)
     })
-  }, [sessions, filter, query, workspaceFilter, sortBy, emptyList, starredList])
+  }, [sessions, filter, query, workspaceFilter, sortBy, emptyList, starredList, tagFilter, tagsReady])
   const selIds = Object.keys(selected).filter((k) => selected[k])
   // 「回收站」是独立视图，不共用会话列表。
   const showSessionList = filter !== 'trash'
@@ -673,6 +1023,25 @@ function SessionPanel({ workspacesSvc }) {
     const li = lineage[String(sessionId)]
     if (!li || !li.empty) return null
     return <span className="dsm-empty-chip" title="无内容的空白会话">空白</span>
+  }
+
+  // T4 卡片标签 chips：分支/空白 chip 之后，每卡最多 3 个 +「+N」计数。
+  // 数据走本地 assignments（tags/list 失败 = 空表 = 不显示，符合降级红线）；
+  // 死 id（标签被别处删）查不到名字 → 跳过，幽灵绝不上屏。+N 的 title 列全名。
+  const tagChips = (sessionId) => {
+    if (!tagsReady) return null
+    const ids = Array.isArray(assignments[String(sessionId)]) ? assignments[String(sessionId)] : []
+    const names = []
+    for (const id of ids) { const n = tagMap.get(String(id)); if (n) names.push(n) }
+    if (!names.length) return null
+    const shown = names.slice(0, 3)
+    const rest = names.slice(3)
+    return (
+      <>
+        {shown.map((n, i) => <span key={i} className="dsm-tagchip" title={'标签：' + n}>{n}</span>)}
+        {rest.length > 0 && <span className="dsm-tagchip dsm-tagchip-more" title={'另有标签：' + rest.join('、')}>+{rest.length}</span>}
+      </>
+    )
   }
 
   const renderKids = (parentId, depth) => {
@@ -1008,6 +1377,7 @@ function SessionPanel({ workspacesSvc }) {
   const openMoveFor = (it) => {
     if (!canMove.available) { setError(canMove.reason || '当前环境不支持跨工作区移动'); return }
     if (openMove === it.sessionId) { setOpenMove(null); return }
+    setOpenTags(null)
     setTargetWs(workspaces.length ? (targetWs || workspaces[0].workspaceId) : '')
     setMoveMode('existing')
     setNewPath('')
@@ -1061,12 +1431,21 @@ function SessionPanel({ workspacesSvc }) {
     return <span className="archv-wtag">未分组</span>
   }
 
+  const openTagsFor = (it) => {
+    if (!tagsReady) { showToast(tagsState === 'failed' ? '标签数据未能加载，暂时无法编辑标签；重新打开设置面板可重试' : '标签数据还在加载中，稍候再试', 'err'); return }
+    if (openTags === it.sessionId) { setOpenTags(null); return }
+    setOpenMove(null)
+    setCardTagName('')
+    setOpenTags(it.sessionId)
+  }
+
   const runMenu = (id, it) => {
     setOpenMenu(null)
     if (id === 'restore') act('restore', it)
     else if (id === 'archive') act('archive', it)
     else if (id === 'delete') setDelTarget(it)
     else if (id === 'move') openMoveFor(it)
+    else if (id === 'tags') openTagsFor(it)
     else if (id === 'details') toggleDetails(it)
   }
 
@@ -1075,10 +1454,11 @@ function SessionPanel({ workspacesSvc }) {
       ? [
           ['restore', '恢复'],
           ['move', openMove === it.sessionId ? '收起移动' : '移动'],
+          ['tags', '标签'],
           ['details', openDetails === it.sessionId ? '收起详情' : '详情'],
           ['delete', '删除'],
         ]
-      : [['archive', '归档'], ['move', '移动'], ['details', '详情'], ['delete', '删除']]
+      : [['archive', '归档'], ['move', '移动'], ['tags', openTags === it.sessionId ? '收起标签' : '标签'], ['details', '详情'], ['delete', '删除']]
     return (
       <div ref={openMenu === it.sessionId ? menuRef : null} className="more-wrap">
         <button
@@ -1092,7 +1472,8 @@ function SessionPanel({ workspacesSvc }) {
         {openMenu === it.sessionId && (
           <div className="more-menu" role="menu">
             {items.map(([id, label]) => {
-              const blocked = id === 'move' && !canMove.available
+              const blocked = (id === 'move' && !canMove.available) || (id === 'tags' && !tagsReady)
+              const blockedTitle = id === 'move' ? canMove.reason : id === 'tags' ? tagsBlockedTitle : undefined
               return (
               <button
                 key={id}
@@ -1100,7 +1481,7 @@ function SessionPanel({ workspacesSvc }) {
                 role="menuitem"
                 className={'more-item' + (id === 'delete' ? ' more-item-danger' : '')}
                 disabled={blocked}
-                title={blocked ? canMove.reason : undefined}
+                title={blocked ? blockedTitle : undefined}
                 onClick={() => runMenu(id, it)}
               >{label}</button>
               )
@@ -1158,8 +1539,103 @@ function SessionPanel({ workspacesSvc }) {
               <button type="button" className="sess-farrow" aria-expanded={moreOpen} aria-label={moreOpen ? '收起更多筛选' : '展开更多筛选'} title={moreOpen ? '收起更多筛选' : '展开更多筛选（已收藏 / 空白 / 回收站）'} onClick={() => setMoreOpen(!moreOpen)}>
                 <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2l4 4-4 4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/></svg>
               </button>
+              {/* T4：标签管理入口——低频操作，做成折叠区之后的普通按钮，
+                  不新增顶层视图 tab（UI 红线）。 */}
+              <button
+                type="button"
+                className="archv-btn"
+                aria-expanded={openTagMgr}
+                disabled={!tagsReady && !openTagMgr}
+                title={tagsReady ? '新建 / 重命名 / 合并 / 删除标签' : tagsBlockedTitle}
+                onClick={() => { setOpenTagMgr(!openTagMgr); setRenamingTagId(null) }}
+              >标签管理{tagsReady && tagDefs.length ? ` (${tagDefs.length})` : ''}</button>
             </div>
           </div>
+
+          {/* T4 标签管理 sheet：照自动归档/待移动队列的 mv-sheet 先例。
+              每行 = 名字 / 用量 / 重命名（内联输入）/ 并入 select + 确认 / 删除。
+              删除确认文案含「只删标签，不会删除会话」红线（logic.tagDeleteConfirm）。 */}
+          {openTagMgr && (
+            <div className="mv-sheet" aria-label="标签管理">
+              <div className="mv-sheet-head">
+                <h3 className="mv-sheet-title">标签管理 · {tagDefs.length}</h3>
+                <button type="button" className="mv-sheet-close" aria-label="关闭" onClick={() => { setOpenTagMgr(false); setRenamingTagId(null) }}>×</button>
+              </div>
+              <div className="mv-field">
+                <label className="mv-field-label" htmlFor="dsm-tag-new">新建标签</label>
+                <div className="mv-browse-row">
+                  <input
+                    id="dsm-tag-new"
+                    type="text"
+                    value={mgrTagName}
+                    disabled={mgrBusy}
+                    maxLength={24}
+                    placeholder="标签名（不能含斜杠，最长 24 字）"
+                    onChange={(e) => setMgrTagName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); createTag() } }}
+                  />
+                  <button type="button" className="archv-btn" disabled={mgrBusy || !mgrTagName.trim()} onClick={createTag}>新建</button>
+                </div>
+              </div>
+              {tagDefs.length === 0 ? (
+                <div className="dtl-note">还没有标签。在上方输入名字即可创建；给会话贴标签也可以在会话卡片的「⋯ → 标签」里进行。</div>
+              ) : (
+                <div>
+                  {tagDefs.map((t) => {
+                    const others = tagDefs.filter((o) => String(o.id) !== String(t.id))
+                    return (
+                      <div key={String(t.id)} className="dsm-tagrow">
+                        {renamingTagId === String(t.id) ? (
+                          <>
+                            <input
+                              className="dsm-tag-input"
+                              type="text"
+                              value={renameTagValue}
+                              disabled={mgrBusy}
+                              maxLength={24}
+                              aria-label={'重命名标签 ' + t.name}
+                              autoFocus
+                              onChange={(e) => setRenameTagValue(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commitTagRename(t) } if (e.key === 'Escape') setRenamingTagId(null) }}
+                            />
+                            <span className="dsm-tag-acts">
+                              <button type="button" className="archv-btn archv-go" disabled={mgrBusy || !renameTagValue.trim()} onClick={() => commitTagRename(t)}>保存</button>
+                              <button type="button" className="archv-btn" disabled={mgrBusy} onClick={() => setRenamingTagId(null)}>取消</button>
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="dsm-tag-name" title={t.name}>{t.name}</span>
+                            <span className="maint-note">{tagUsage[String(t.id)] || 0} 个会话</span>
+                            <span className="dsm-tag-acts">
+                              <button type="button" className="archv-btn" disabled={mgrBusy || renamingTagId !== null} title="重命名这个标签" onClick={() => { setRenamingTagId(String(t.id)); setRenameTagValue(t.name) }}>重命名</button>
+                              {others.length > 0 && (
+                                <>
+                                  <select
+                                    aria-label={'把标签「' + t.name + '」并入'}
+                                    value={mergeTarget[String(t.id)] || ''}
+                                    disabled={mgrBusy}
+                                    title="把这个标签的所有会话并入另一个标签（并入后本标签删除）"
+                                    onChange={(e) => setMergeTarget((m) => Object.assign({}, m, { [String(t.id)]: e.target.value }))}
+                                  >
+                                    <option value="">并入…</option>
+                                    {others.map((o) => <option key={String(o.id)} value={String(o.id)}>{o.name}</option>)}
+                                  </select>
+                                  <button type="button" className="archv-btn" disabled={mgrBusy || !mergeTarget[String(t.id)]} title={mergeTarget[String(t.id)] ? '确认并入所选标签' : '先在左侧选择并入的目标标签'} onClick={() => mergeTag(t)}>确认</button>
+                                </>
+                              )}
+                              <button type="button" className="archv-btn archv-del" disabled={mgrBusy} title="删除标签（只删标签，不会删除会话）" onClick={() => deleteTag(t)}>删除</button>
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+              <div className="dtl-note">标签是会话的自定义标记：新建、重命名、合并、删除都只改标记本身，不会删除或移动任何会话。单个会话的标签数量与标签总数都有服务端上限，超限时会提示并自动回退本地改动。</div>
+            </div>
+          )}
 
           {/* 维护栏是面板级工具，与当前查看哪一组会话无关，故所有视图都显示。 */}
           <div className="maint-bar">
@@ -1269,7 +1745,7 @@ function SessionPanel({ workspacesSvc }) {
           )}
           {showSessionList && (
             <>
-              <div className="sess-tools sess-tools-4" aria-label="查找和整理会话">
+              <div className="sess-tools sess-tools-5" aria-label="查找和整理会话">
                 <div className="sess-field">
                   <label htmlFor="dsm-search">搜索会话</label>
                   <input id="dsm-search" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="标题、会话 ID 或工作区" />
@@ -1279,6 +1755,25 @@ function SessionPanel({ workspacesSvc }) {
                   <select id="dsm-workspace-filter" value={workspaceFilter} onChange={(e) => setWorkspaceFilter(e.target.value)}>
                     <option value="all">全部工作区</option>
                     {workspaces.map((w) => <option key={w.workspaceId} value={w.path}>{w.title}</option>)}
+                    {/* 已存筛选可能指向已删除的工作区：补一个兜底 option，select 永不显示空白。 */}
+                    {workspaceFilter !== 'all' && !workspaces.some((w) => w.path === workspaceFilter) && (
+                      <option value={workspaceFilter}>已删工作区 · {pathName(workspaceFilter) || '?'}</option>
+                    )}
+                  </select>
+                </div>
+                <div className="sess-field">
+                  {/* T4 标签筛选（单选）。v1 明确不做多选 AND：见 logic.applyTagFilter 注释。 */}
+                  <label htmlFor="dsm-tag-filter">标签</label>
+                  <select
+                    id="dsm-tag-filter"
+                    value={tagFilter}
+                    disabled={!tagsReady}
+                    title={!tagsReady ? tagsBlockedTitle : tagFilter ? '当前按「' + (tagMap.get(tagFilter) || '所选标签') + '」筛选；多选组合可用「保存当前筛选」固化' : '按标签筛选（单选）'}
+                    onChange={(e) => setTagFilter(e.target.value)}
+                  >
+                    <option value="">全部标签</option>
+                    {tagDefs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                    {tagFilter && !tagMap.has(tagFilter) && <option value={tagFilter}>（已删标签）</option>}
                   </select>
                 </div>
                 <div className="sess-field">
@@ -1295,16 +1790,66 @@ function SessionPanel({ workspacesSvc }) {
                   </select>
                 </div>
               </div>
-              <div className="sess-results" role="status">
+              <div className="sess-results">
                 {/* 一句话说清现状：有子代理折叠时，折叠数取代「共 X 个」尾巴
-                    出现在同一句里；没有折叠时维持「显示 N 个，共 M 个」。 */}
-                <span className="sess-results-main">
+                    出现在同一句里；没有折叠时维持「显示 N 个，共 M 个」。
+                    role=status 移到这句正文上，右侧保存控件组不进播报区。 */}
+                <span className="sess-results-main" role="status">
                   显示 {topList.length - syntheticCount} 个会话
                   {foldedCount || branchFolded
                     ? `，另有 ${[foldedCount ? `${foldedCount} 个子代理折叠在父会话下` : '', branchFolded ? `${branchFolded} 个分支聚成 ${branchGroupCount} 组` : ''].filter(Boolean).join('、')}`
-                    : query || workspaceFilter !== 'all'
+                    : query || workspaceFilter !== 'all' || tagFilter
                       ? `，共 ${filter === 'archived' ? archivedList.length : filter === 'active' ? activeList.length : filter === 'starred' ? starredList.length : filter === 'empty' ? emptyList.length : sessions.length} 个`
                       : (topList.length !== list.length ? `，共 ${list.length} 个` : '')}
+                </span>
+                {/* T4：计数行右侧的保存筛选控件组。保存 = 抓 {view,workspace,
+                    sort,tag} 快照（logic.filterSnapshotOf）落盘；已存下拉
+                    「选中即应用」（logic.filterShapeFromSaved 还原，非法字段
+                    回落默认并 toast 标注），行内删除作用于当前选中项。 */}
+                <span className="dsm-fbar">
+                  {saveFilterOpen ? (
+                    <>
+                      <input
+                        type="text"
+                        value={saveFilterName}
+                        maxLength={40}
+                        placeholder="筛选名称"
+                        aria-label="为当前筛选命名"
+                        autoFocus
+                        disabled={mgrBusy}
+                        onChange={(e) => setSaveFilterName(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); saveCurrentFilter() } if (e.key === 'Escape') { setSaveFilterOpen(false); setSaveFilterName('') } }}
+                      />
+                      <button type="button" className="archv-btn archv-go" disabled={mgrBusy || !saveFilterName.trim()} onClick={saveCurrentFilter}>保存</button>
+                      <button type="button" className="archv-btn" disabled={mgrBusy} onClick={() => { setSaveFilterOpen(false); setSaveFilterName('') }}>取消</button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className="archv-btn"
+                      title="把当前视图 / 工作区 / 标签 / 排序存为一个可复用的筛选"
+                      onClick={() => { setSaveFilterOpen(true); setSaveFilterName('') }}
+                    >保存当前筛选</button>
+                  )}
+                  <select
+                    aria-label="已存筛选"
+                    value={savedFilters.some((f) => String(f.id) === appliedSavedId) ? appliedSavedId : ''}
+                    disabled={!savedFilters.length || mgrBusy}
+                    title={!savedFilters.length ? '还没有已存筛选；点左侧「保存当前筛选」创建' : '选择一个已存筛选并立即应用；选中后右侧可删除'}
+                    onChange={(e) => applySavedFilter(e.target.value)}
+                  >
+                    <option value="">{savedFilters.length ? '已存筛选…' : '无已存筛选'}</option>
+                    {savedFilters.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+                  </select>
+                  {appliedSavedId && (
+                    <button
+                      type="button"
+                      className="archv-btn archv-del"
+                      disabled={mgrBusy}
+                      title={'删除已存筛选「' + ((savedFilters.find((f) => String(f.id) === appliedSavedId) || {}).name || appliedSavedId) + '」（只删这条保存的筛选，不动会话）'}
+                      onClick={() => deleteSavedFilter(appliedSavedId)}
+                    >删除</button>
+                  )}
                 </span>
               </div>
             </>
@@ -1394,7 +1939,7 @@ function SessionPanel({ workspacesSvc }) {
           )}
 
           {showSessionList && list.length === 0 ? (
-            <div className="archv-empty">{query || workspaceFilter !== 'all' ? '没有匹配的会话。请调整搜索词或工作区筛选。' : filter === 'archived' ? '目前没有归档会话。在“全部”里选中会话点“归档”即可收纳进来。' : filter === 'active' ? '目前没有活动会话。' : filter === 'starred' ? '还没有收藏的会话。点击会话左侧的星标即可收藏。' : filter === 'empty' ? '没有空白会话。新开会话还没产生内容时会归到这里，侧栏会自动隐藏它们。' : '暂无可管理的会话。'}</div>
+            <div className="archv-empty">{query || workspaceFilter !== 'all' || tagFilter ? '没有匹配的会话。请调整搜索词、标签或工作区筛选。' : filter === 'archived' ? '目前没有归档会话。在“全部”里选中会话点“归档”即可收纳进来。' : filter === 'active' ? '目前没有活动会话。' : filter === 'starred' ? '还没有收藏的会话。点击会话左侧的星标即可收藏。' : filter === 'empty' ? '没有空白会话。新开会话还没产生内容时会归到这里，侧栏会自动隐藏它们。' : '暂无可管理的会话。'}</div>
           ) : showSessionList ? (
             <div className="archv-list" role="list">
               {topList.map((it) => {
@@ -1421,7 +1966,7 @@ function SessionPanel({ workspacesSvc }) {
                   )
                 }
                 const date = fmtDate(it.createdAt)
-                const expanded = openMove === it.sessionId
+                const expanded = openMove === it.sessionId || openTags === it.sessionId
                 return (
                   <div key={it.sessionId} className={'archv-card' + (expanded ? ' archv-card-exp' : '')} role="listitem">
                     <div className="archv-row">
@@ -1448,6 +1993,7 @@ function SessionPanel({ workspacesSvc }) {
                             <span className="archv-name" title={it.title || ''}>{it.title || '(无标题)'}</span>
                             {branchBadge(it.sessionId)}
                             {emptyBadge(it.sessionId)}
+                            {tagChips(it.sessionId)}
                             {kidsBadge(it.sessionId)}
                             {branchGroupBadge(it.sessionId)}
                             <span className="archv-id" title={it.sessionId}>{shortId(it.sessionId)}</span>
@@ -1514,6 +2060,53 @@ function SessionPanel({ workspacesSvc }) {
                         </div>
                       </div>
                     )}
+                    {openTags === it.sessionId && (() => {
+                      // T4 卡内标签编辑 sheet（mv-sheet 同型）：勾选即时全量
+                      // /tags/set，乐观 + 回滚；死 id 行不渲染。底部「新建标签
+                      // 并贴上」回车即提交。
+                      const cur = Array.isArray(assignments[String(it.sessionId)]) ? assignments[String(it.sessionId)] : []
+                      const locked = tagBusy !== null || !tagsReady
+                      return (
+                      <div className="mv-sheet" role="region" aria-label="会话标签">
+                        <div className="mv-sheet-head">
+                          <h3 className="mv-sheet-title">会话标签 · {it.title || shortId(it.sessionId)}</h3>
+                          <button type="button" className="mv-sheet-close" aria-label="关闭" onClick={() => setOpenTags(null)}>×</button>
+                        </div>
+                        {tagDefs.length === 0 ? (
+                          <div className="dtl-note">还没有标签，在下方新建第一个。</div>
+                        ) : (
+                          <div className="dsm-taglist">
+                            {tagDefs.map((t) => {
+                              const checked = cur.some((id) => String(id) === String(t.id))
+                              return (
+                                <label className="dsm-tagcheck" key={String(t.id)}>
+                                  <input type="checkbox" checked={checked} disabled={locked} onChange={() => toggleTagFor(it.sessionId, t.id)} />
+                                  <span className="dsm-tagcheck-name" title={t.name}>{t.name}</span>
+                                </label>
+                              )
+                            })}
+                          </div>
+                        )}
+                        <div className="mv-field">
+                          <label className="mv-field-label" htmlFor={'dsm-tag-attach-' + String(it.sessionId)}>新建标签并贴上</label>
+                          <div className="mv-browse-row">
+                            <input
+                              id={'dsm-tag-attach-' + String(it.sessionId)}
+                              type="text"
+                              value={cardTagName}
+                              disabled={locked}
+                              maxLength={24}
+                              placeholder="标签名（不能含斜杠，最长 24 字）"
+                              onChange={(e) => setCardTagName(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); createTagAndAttach(it.sessionId) } }}
+                            />
+                            <button type="button" className="archv-btn" disabled={locked || !cardTagName.trim()} title={locked && !tagsReady ? '标签数据未能加载，暂时无法新建标签' : '新建这个标签并立即贴到当前会话'} onClick={() => createTagAndAttach(it.sessionId)}>贴上</button>
+                          </div>
+                        </div>
+                        <div className="dtl-note">勾选即时生效；单个会话的标签数量以服务端上限为准，超时会提示并回退。</div>
+                      </div>
+                      )
+                    })()}
                     {openDetails === it.sessionId && (
                       <div className="dtl-sheet" role="region" aria-label="会话详情">
                         <div className="dtl-sheet-head">

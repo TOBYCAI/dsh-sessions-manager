@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { ascBranchTime, authoritativeTitleForFirstPaint, branchTimeKey, canDropOnWorkspace, dotStateFor, effectiveTitleOf, foldBranches, foldSubagents, moveNoticeText, noticeToastPlan, openSubagentToast, pathTail, sessionForNodes, shortId, starredOf, titleBackfillDecision, TOAST_MAX_MS, TOAST_MIN_MS, toastDurationFor, workspaceForNodes } from '../src/client/logic.js'
+import { applyTagFilter, ascBranchTime, authoritativeTitleForFirstPaint, branchTimeKey, canDropOnWorkspace, dotStateFor, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldSubagents, moveNoticeText, noticeToastPlan, openSubagentToast, pathTail, sessionForNodes, shortId, starredOf, tagDeleteConfirm, titleBackfillDecision, TOAST_MAX_MS, TOAST_MIN_MS, toastDurationFor, workspaceForNodes } from '../src/client/logic.js'
 
 // ---- dotStateFor：状态点语义 ----------------------------------------------
 // 历史回归：DSH 把 running 报成 ongoing（9766476）；done 在当前行上不能亮绿
@@ -556,4 +556,115 @@ test('E3: lineage 迟到——第一次空表、第二次全表，两次都守�
   assert.deepEqual(r2.branchGroupsOf.get('P').map((i) => i.sessionId), ['b2', 'b1'])
   assertConserved(r2, items, 'E3/到齐后')
 })
+
+// —— T4（3.7.0）：applyTagFilter / 筛选快照 / 标签删除确认文案 ————
+
+// ---- applyTagFilter：标签筛选（单选）--------------------------------------
+
+test('applyTagFilter: 空 tagId（\'\'/null/undefined/缺省）原样返回同一数组', () => {
+  const list = [{ sessionId: 'a', tags: ['t1'] }, { sessionId: 'b', tags: [] }]
+  assert.equal(applyTagFilter(list, ''), list, '空串须原样返回（同一引用，不做拷贝）')
+  assert.equal(applyTagFilter(list, null), list)
+  assert.equal(applyTagFilter(list, undefined), list)
+  assert.equal(applyTagFilter(list), list, '缺省参数等同不筛')
+})
+
+test('applyTagFilter: 命中子集；id 比较字符串化防类型漂移', () => {
+  const list = [
+    { sessionId: 'a', tags: ['t1', 't2'] },
+    { sessionId: 'b', tags: ['t2'] },
+    { sessionId: 'c', tags: [] },
+    { sessionId: 'd' },
+  ]
+  assert.deepEqual(applyTagFilter(list, 't2').map((i) => i.sessionId), ['a', 'b'])
+  assert.deepEqual(applyTagFilter(list, 't1').map((i) => i.sessionId), ['a'])
+  assert.equal(applyTagFilter(list, 7).length, 0)
+  // 数字 id vs 字符串 tagId：字符串化后仍命中（host/本地类型漂移不得漏判）。
+  assert.deepEqual(applyTagFilter([{ sessionId: 'x', tags: [7] }], '7').map((i) => i.sessionId), ['x'])
+})
+
+test('applyTagFilter: 畸形输入一律宽容不抛错，非数组 tags 视为不匹配', () => {
+  assert.deepEqual(applyTagFilter(null, 't1'), [])
+  assert.deepEqual(applyTagFilter(undefined, 't1'), [])
+  assert.deepEqual(applyTagFilter('not-a-list', 't1'), [])
+  const junk = [null, undefined, {}, { sessionId: 'ok', tags: 'not-array' }, { sessionId: 'hit', tags: ['t1'] }]
+  assert.deepEqual(applyTagFilter(junk, 't1').map((i) => i.sessionId), ['hit'])
+  // 未知 tagId → 空表（诚实的 0 结果，绝不抛错）。
+  assert.deepEqual(applyTagFilter([{ sessionId: 'a', tags: ['t1'] }], 'gone'), [])
+})
+
+// ---- 标签删除确认文案（copy-guard 的纯函数替身）---------------------------
+
+test('tagDeleteConfirm: 含删除红线关键词与会话名，未命名兜底', () => {
+  const t = tagDeleteConfirm('重要项目')
+  assert.ok(t.includes('重要项目'), '文案必须点名被删标签')
+  assert.ok(t.includes('只删标签，不会删除会话'), '红线：必须明说不会删除会话（防用户以为会话丢）')
+  assert.ok(t.includes('删除标签'), '必须以删除标签开头表意')
+  assert.ok(tagDeleteConfirm('').includes('(未命名)'), '空名兜底')
+  assert.ok(tagDeleteConfirm(null).includes('(未命名)'), 'null 兜底')
+})
+
+// ---- 已存筛选：快照落盘 / 读回 / 往返 / 脏数据 ----------------------------
+
+test('filterSnapshotOf: 合法值原样抓取；非法/缺省回落默认', () => {
+  assert.deepEqual(
+    filterSnapshotOf({ filter: 'archived', workspaceFilter: '/tmp/w', sortBy: 'title', tagFilter: 't1' }),
+    { view: 'archived', workspace: '/tmp/w', sort: 'title', tag: 't1' },
+  )
+  assert.deepEqual(filterSnapshotOf(), { view: 'all', workspace: 'all', sort: 'newest', tag: '' })
+  assert.deepEqual(
+    filterSnapshotOf({ filter: 'nope', workspaceFilter: '', sortBy: 42, tagFilter: null }),
+    { view: 'all', workspace: 'all', sort: 'newest', tag: '' },
+  )
+  // 'all' 视图/工作区是合法域内值，原样保留（不回落）。
+  assert.deepEqual(
+    filterSnapshotOf({ filter: 'all', workspaceFilter: 'all', sortBy: 'oldest', tagFilter: '' }),
+    { view: 'all', workspace: 'all', sort: 'oldest', tag: '' },
+  )
+})
+
+test('filterShapeFromSaved ↔ filterSnapshotOf: 往返等值且 degraded 全空', () => {
+  const states = [
+    { filter: 'all', workspaceFilter: 'all', sortBy: 'newest', tagFilter: '' },
+    { filter: 'archived', workspaceFilter: '/Users/x/proj', sortBy: 'title', tagFilter: 't_abc' },
+    { filter: 'trash', workspaceFilter: '', sortBy: 'oldest', tagFilter: '' },
+    { filter: 'starred', workspaceFilter: '/p', sortBy: 'newest', tagFilter: 't_zzz' },
+  ]
+  for (const s of states) {
+    const saved = { id: 'f_1', name: 'n', createdAt: 1, filters: filterSnapshotOf(s) }
+    const back = filterShapeFromSaved(saved)
+    assert.equal(back.view, s.filter || 'all')
+    assert.equal(back.workspace, s.workspaceFilter || 'all')
+    assert.equal(back.sort, s.sortBy)
+    assert.equal(back.tag, s.tagFilter)
+    assert.deepEqual(back.degraded, [], '干净快照读回不得标任何 degraded: ' + JSON.stringify(s))
+  }
+})
+
+test('filterShapeFromSaved: 非法字段逐项回落默认并在 degraded 标注', () => {
+  const r = filterShapeFromSaved({ filters: { view: 'bogus', workspace: 42, sort: 'date', tag: { evil: 1 } } })
+  assert.equal(r.view, 'all')
+  assert.equal(r.workspace, 'all')
+  assert.equal(r.sort, 'newest')
+  assert.equal(r.tag, '')
+  assert.deepEqual(r.degraded.sort(), ['sort', 'tag', 'view', 'workspace'])
+})
+
+test('filterShapeFromSaved: 脏数据宽容——null/数组/缺字段统统不抛错', () => {
+  for (const junk of [null, undefined, {}, 'str', [], { filters: null }, { filters: [] }, { filters: 'x' }, { filters: 42 }]) {
+    const r = filterShapeFromSaved(junk)
+    assert.equal(r.view, 'all')
+    assert.equal(r.workspace, 'all')
+    assert.equal(r.sort, 'newest')
+    assert.equal(r.tag, '')
+    assert.equal(r.degraded.length, 4, '整条皆脏 = 四字段全部标注回落: ' + JSON.stringify(junk))
+  }
+  // 部分缺字段：只标缺的那个；'' 的 tag 是合法值（=全部标签），不标注。
+  const partial = filterShapeFromSaved({ filters: { view: 'empty', workspace: '/p', sort: 'newest', tag: '' } })
+  assert.deepEqual(partial, { view: 'empty', workspace: '/p', sort: 'newest', tag: '', degraded: [] })
+  const noTag = filterShapeFromSaved({ filters: { view: 'all', workspace: 'all', sort: 'all' } })
+  assert.equal(noTag.sort, 'newest')
+  assert.deepEqual(noTag.degraded, ['sort', 'tag'], 'sort 非法值 + tag 缺失 → 各标一项')
+})
+
 
