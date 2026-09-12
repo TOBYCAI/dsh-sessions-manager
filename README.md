@@ -78,7 +78,8 @@ DSH（0.1.5 起）给每个会话日志加了**单写者锁**：会话一旦被 
 - 命中占用时**不会失败**，而是登记进待移动队列（`~/.dsh/sessions-manager/pending-moves.json`），并**如实提示「已排队」**——绝不会在没有真正搬运的情况下报「已移动」。
 - 队列的自动执行时机：**插件启动后立即并密集重试**（0 / 1 / 3 / 6 / 12 / 30 秒，必须抢在浏览器打开会话之前）、之后每 2 分钟轻量兜底、以及宿主释放会话时。
 - 队列最多保留 50 条；同一条连续 5 次因**非占用原因**失败会被放弃并记录日志（启动 30 秒内的失败不计入，避免启动竞态丢队列）。
-- 查看与取消：`POST /archived-sessions/pending-moves`、`POST /archived-sessions/pending-moves/cancel { sessionIds }`。
+- 查看与取消：`POST /archived-sessions/pending-moves`、`POST /archived-sessions/pending-moves/cancel { sessionIds }`；队列非空时面板显示「待移动队列」小节（逐条取消）。
+- **结果不再静默**：后台完成或最终放弃（连续 5 次非占用失败）会落成通知，下次打开 DSH 页面时以提示弹出（放弃类附原因）。通知在服务端保留到确认展示（最多 20 条、最长 7 天），没弹就不会丢。
 - **要真正搬走一个活跃会话**：先发起移动（进队列），再**重启 DSH 并先别打开那个会话**——启动后几秒内会自动完成。未完成的项跨重启保留，不会丢。
 
 ### 关于会话格式 v3（DSH 0.1.5+）
@@ -180,8 +181,9 @@ lib/client.js      预构建 client（ModuleLoader CJS handshake）
 | POST | `/archived-sessions/move-many` | 批量跨工作区移动 `{ sessionIds, targetPath }`——单条失败不阻断，失败明细逐条回报，被占用的会话进 `queued` 列表，末尾统一重建索引 |
 | POST | `/archived-sessions/pending-moves` | 查看待移动队列（会话被占用时排队，释放后自动完成） |
 | POST | `/archived-sessions/pending-moves/cancel` | 取消排队 `{ sessionIds }` |
+| POST | `/archived-sessions/pending-moves/notices/ack` | 确认排队移动终局通知（展示后清理；未确认项最长保留 7 天） |
 | POST | `/archived-sessions/details` | 会话详情（磁盘/统计/工具/fetch/文件/血缘）`{ sessionId }` |
-| POST | `/archived-sessions/sidebar-state` | 返回侧栏权威标题、回收站 ID、永久删除墓碑、**血缘分层**（子代理 / 分支 / 空白标记）与 `warmPending` / `refinePending`（标题预热、空白精判两条后台队列是否仍在途） |
+| POST | `/archived-sessions/sidebar-state` | 返回侧栏权威标题、回收站 ID、永久删除墓碑、**血缘分层**（子代理 / 分支 / 空白标记）、`warmPending` / `refinePending`（标题预热、空白精判两条后台队列是否仍在途）与 `moveNotices`（排队移动终局通知，空则省略字段） |
 | POST | `/archived-sessions/lineage-tree` | 递归子代理树（面板血缘分组与侧栏折叠的数据源），已过滤回收站与墓碑 |
 | POST | `/archived-sessions/star/set` | 收藏 / 取消收藏 `{ sessionId 或 sessionIds, starred }` |
 | GET | `/archived-sessions/export-md?sessionId=` | 单会话 Markdown 导出（人类可读对话记录） |

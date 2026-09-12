@@ -78,7 +78,8 @@ So held-open sessions get **deferred (queued) moves**:
 - The request does not fail; the move is recorded in a pending queue (`~/.dsh/sessions-manager/pending-moves.json`) and the plugin reports **"queued" honestly** — it never claims "moved" for a move that did not happen.
 - The queue runs automatically **immediately after plugin startup and retries densely** (0 / 1 / 3 / 6 / 12 / 30 s — it must win the race against the browser opening sessions), then on a light 2-minute fallback, and whenever the host releases a session.
 - Up to 50 entries are kept; an entry that fails 5 times for **non-lock** reasons is dropped and logged (failures within the first 30 s after startup do not count, so a startup race cannot silently drop your queue).
-- Inspect / cancel: `POST /archived-sessions/pending-moves`, `POST /archived-sessions/pending-moves/cancel { sessionIds }`.
+- Inspect / cancel: `POST /archived-sessions/pending-moves`, `POST /archived-sessions/pending-moves/cancel { sessionIds }`; while the queue is non-empty the panel also shows a **Pending moves queue** section with per-entry cancel.
+- **Results are no longer silent**: a background completion or a final give-up (5 consecutive non-lock failures) becomes a persisted notice, surfaced as a toast the next time a DSH page is open (give-ups include the reason). Notices stay on the server until acknowledged (up to 20, at most 7 days) — closing the page before the toast never loses one.
 - **To actually move an active session**: request the move (it queues), then **restart DSH and don't open that session first** — it completes a few seconds after startup. Pending entries survive restarts.
 
 ### Session format v3 (DSH 0.1.5+)
@@ -180,8 +181,9 @@ lib/client.js      pre-built client (ModuleLoader CJS handshake)
 | POST | `/archived-sessions/move-many` | Batch cross-workspace move `{ sessionIds, targetPath }` — one failure never blocks the rest, failures are reported per session, held-open sessions land in `queued`, and the grouping index is rebuilt once at the end |
 | POST | `/archived-sessions/pending-moves` | Inspect the pending-move queue (sessions queued while held open; completed automatically once released) |
 | POST | `/archived-sessions/pending-moves/cancel` | Cancel queued moves `{ sessionIds }` |
+| POST | `/archived-sessions/pending-moves/notices/ack` | Acknowledge queued-move outcome notices (cleared once shown; unacknowledged ones live at most 7 days) |
 | POST | `/archived-sessions/details` | Session details (disk / stats / tools / fetch / files / lineage) `{ sessionId }` |
-| POST | `/archived-sessions/sidebar-state` | Authoritative sidebar titles, recycle-bin IDs, permanent-deletion tombstones, **lineage disclosure** (subagent / branch / empty badges), and `warmPending` / `refinePending` (whether the title-warming and empty-refinement background queues still have work in flight) |
+| POST | `/archived-sessions/sidebar-state` | Authoritative sidebar titles, recycle-bin IDs, permanent-deletion tombstones, **lineage disclosure** (subagent / branch / empty badges), , `warmPending` / `refinePending` (whether the title-warming and empty-refinement background queues still have work in flight) and `moveNotices` (queued-move outcome notices; omitted when empty) |
 | POST | `/archived-sessions/lineage-tree` | Recursive subagent tree (feeds the panel's Lineage grouping and the sidebar folding), filtered for recycle-bin and tombstoned sessions |
 | POST | `/archived-sessions/star/set` | Star / unstar sessions `{ sessionId or sessionIds, starred }` |
 | GET | `/archived-sessions/export-md?sessionId=` | Single-session Markdown export (human-readable transcript) |

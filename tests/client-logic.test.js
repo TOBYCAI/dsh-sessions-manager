@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { authoritativeTitleForFirstPaint, canDropOnWorkspace, dotStateFor, effectiveTitleOf, foldSubagents, openSubagentToast, sessionForNodes, shortId, starredOf, titleBackfillDecision, TOAST_MAX_MS, TOAST_MIN_MS, toastDurationFor, workspaceForNodes } from '../src/client/logic.js'
+import { authoritativeTitleForFirstPaint, canDropOnWorkspace, dotStateFor, effectiveTitleOf, foldSubagents, moveNoticeText, noticeToastPlan, openSubagentToast, pathTail, sessionForNodes, shortId, starredOf, titleBackfillDecision, TOAST_MAX_MS, TOAST_MIN_MS, toastDurationFor, workspaceForNodes } from '../src/client/logic.js'
 
 // ---- dotStateFor：状态点语义 ----------------------------------------------
 // 历史回归：DSH 把 running 报成 ongoing（9766476）；done 在当前行上不能亮绿
@@ -260,5 +260,34 @@ test('effectiveTitleOf: 列表值优先，占位回落权威，都没有给空�
   assert.equal(effectiveTitleOf({ sessionId: 's1', title: null }, map), '权威标题')
   assert.equal(effectiveTitleOf({ sessionId: 's2', title: null }, map), '')
   assert.equal(effectiveTitleOf(null, map), '')
+})
+
+// —— T2：排队移动终局通知的文案与投递计划 ——
+
+test('pathTail/moveNoticeText：路径尾段与两种终局文案', () => {
+  assert.equal(pathTail('/a/b/'), 'b')
+  assert.equal(pathTail('C:\\x\\y'), 'y')
+  assert.equal(pathTail(null), '')
+  const moved = moveNoticeText({ kind: 'moved', sessionId: 'session-abcdef0123456789', targetPath: '/ws/新项目' })
+  assert.ok(moved.includes('已完成') && moved.includes('新项目'), moved)
+  const gone = moveNoticeText({ kind: 'abandoned', sessionId: 's', attempts: 5, reason: '首行原因\n堆栈' })
+  assert.ok(gone.includes('已放弃') && gone.includes('首行原因') && !gone.includes('堆栈'), gone)
+})
+
+test('noticeToastPlan：seen 过滤、展示最新 2 条、省略句合并、只 ack 已展示', () => {
+  const mk = (id, kind, at) => ({ id, kind, sessionId: 's-' + id, targetPath: '/a/b-' + id, at })
+  const raw = [mk('n1', 'moved', 1), mk('n2', 'abandoned', 2), mk('n3', 'moved', 3)]
+  const plan = noticeToastPlan(raw, new Set(['n1']), 2)
+  assert.deepEqual(plan.ackIds, ['n2', 'n3'])
+  assert.equal(plan.kind, 'err')
+  assert.ok(plan.text.includes('已放弃') && plan.text.includes('b-n3'), plan.text)
+  assert.ok(!plan.text.includes('b-n1'), 'seen 过的不得再出现')
+  const many = Array.from({ length: 5 }, (_, i) => mk('m' + i, 'moved', i + 1))
+  const p2 = noticeToastPlan(many, new Set(), 2)
+  assert.equal(p2.ackIds.length, 2)
+  assert.ok(p2.text.includes('另有 3 条'), '溢出并入省略句，未展示项留在服务端')
+  assert.equal(noticeToastPlan(undefined, new Set()).text, null)
+  assert.equal(noticeToastPlan([{ id: 'x', kind: 'weird', sessionId: 's' }], new Set()).text, null)
+  assert.equal(noticeToastPlan([{ id: 'y', kind: 'moved' }], new Set()).text, null, '缺 sessionId 的畸形条目丢弃')
 })
 

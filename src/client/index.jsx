@@ -11,7 +11,7 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { canDropOnWorkspace, dotStateFor, effectiveTitleOf, foldSubagents, openSubagentToast, sessionForNodes, shortId, starredOf, titleBackfillDecision, toastDurationFor, workspaceForNodes } from './logic.js'
+import { canDropOnWorkspace, dotStateFor, effectiveTitleOf, foldSubagents, noticeToastPlan, openSubagentToast, pathTail, sessionForNodes, shortId, starredOf, titleBackfillDecision, toastDurationFor, workspaceForNodes } from './logic.js'
 
 export const inject = ['slots']
 
@@ -354,6 +354,16 @@ function SessionPanel({ workspacesSvc }) {
   const [toast, setToast] = useState(null)
   const [picking, setPicking] = useState(false)
   const [trash, setTrash] = useState([])
+  // T2：待移动队列小节（D4 拍板随本期）——README 承诺了查看/取消，路由早就有，
+  // 缺的只是入口。刷新尽力而为：失败=没队列，绝不打扰列表主流程。
+  const [pendingQueue, setPendingQueue] = useState([])
+  const cancelQueuedMove = async (sid) => {
+    try {
+      await postJSON('/archived-sessions/pending-moves/cancel', { sessionIds: [sid] })
+      showToast('已取消排队，会话留在原工作区', 'ok')
+      setPendingQueue((q) => q.filter((x) => String(x.sessionId) !== String(sid)))
+    } catch (e) { showToast('取消失败：' + String((e && e.message) || e), 'err') }
+  }
   const [trashBusy, setTrashBusy] = useState(null)
   const [trashSettings, setTrashSettings] = useState({ retentionDays: 0 })
   const [trashCheck, setTrashCheck] = useState(null)
@@ -428,6 +438,7 @@ function SessionPanel({ workspacesSvc }) {
         loadLineage()
         if (!targetWs && works.items && works.items.length) setTargetWs(works.items[0].workspaceId)
         loadTrash()
+        postJSON('/archived-sessions/pending-moves', {}).then((q) => setPendingQueue((q && q.items) || [])).catch(() => {})
         // 会话集合变了：面板开着就同步刷新；关着则只标脏，等展开时再刷。
         if (storageOpen) loadStorage()
         else storageDirty.current = true
@@ -448,6 +459,8 @@ function SessionPanel({ workspacesSvc }) {
   const refreshRef = useRef(null)
   refreshRef.current = refresh
   useEffect(() => dsmOnWarmDone(() => { if (refreshRef.current) refreshRef.current() }), [])
+  // T2：侧栏适配器停用（或宿主未装侧栏）时，排队移动通知走面板 toast 通道。
+  useEffect(() => dsmOnNotice((text, kind) => showToast(text, kind)), [])
 
   useEffect(() => {
     try { localStorage.setItem(PANEL_PREFS_KEY, JSON.stringify({ filter, workspaceFilter, sortBy, groupByLineage })) } catch (e) {}
@@ -1070,6 +1083,23 @@ function SessionPanel({ workspacesSvc }) {
               </button>
               {aa.lastRunAt ? <span className="maint-note">上次检查 {fmtDate(aa.lastRunAt)}，归档 {aa.lastArchivedCount} 个</span> : <span className="maint-note">尚未检查</span>}
           </div>
+          {pendingQueue.length > 0 && (
+            <div className="mv-sheet" aria-label="待移动队列">
+              <div className="mv-sheet-head">
+                <h3 className="mv-sheet-title">待移动队列 · {pendingQueue.length}</h3>
+              </div>
+              <div className="dtl-note">这些会话正被 DSH 打开着，官方只在进程退出时释放写权限；释放后插件会自动完成移动，也可重启 DSH 让它在启动头几秒抢先补跑。</div>
+              {pendingQueue.map((q) => (
+                <div key={String(q.sessionId)} className="dsm-kid-row">
+                  <span className="dsm-kid-name" title={`${q.sessionId} → ${q.targetPath || ''}`}>{shortId(q.sessionId)}… → {pathTail(q.targetPath) || '目标工作区'}</span>
+                  <span className="dsm-kid-acts">
+                    {Number.isSafeInteger(q.attempts) && q.attempts > 0 ? <span className="maint-note">已失败 {q.attempts} 次</span> : null}
+                    <button type="button" className="archv-btn" onClick={() => cancelQueuedMove(q.sessionId)}>取消</button>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
           {aaOpen && (
             <div className="mv-sheet" aria-label="自动归档设置">
               <div className="mv-sheet-head">
@@ -1674,6 +1704,30 @@ function dsmOnWarmDone(fn) {
   dsmWarmDoneHooks.add(fn)
   return () => dsmWarmDoneHooks.delete(fn)
 }
+// T2（3.7.0）：排队移动终局通知。已见集合只为本浏览器多 tab 即时去重；服务端
+// 保留到 ack（pop 式会被「没弹就关页面」丢通知），ack 失败无害、7 天 TTL 兜底。
+const DSM_KEY_SEEN_NOTICES = 'dsm-move-notices-seen-v1'
+let dsmSeenNotices = null
+function dsmLoadSeenNotices() {
+  if (dsmSeenNotices) return dsmSeenNotices
+  try { dsmSeenNotices = new Set(JSON.parse(localStorage.getItem(DSM_KEY_SEEN_NOTICES) || '[]').map(String)) } catch (e) { dsmSeenNotices = new Set() }
+  return dsmSeenNotices
+}
+function dsmSaveSeenNotices(set) {
+  try { localStorage.setItem(DSM_KEY_SEEN_NOTICES, JSON.stringify([...set].slice(-200))) } catch (e) {}
+}
+// 通知唯一出口：侧栏通道优先（页面级可见），面板 hook 兜底，都不可用时
+// console.warn——宁可吵，不可无声（copy-guard 锁住 moveNotices 只能走这里）。
+let dsmNotifySink = null
+const dsmNoticeHooks = new Set()
+function dsmNotify(text, kind) {
+  if (!text) return
+  if (dsmNotifySink && !sidebarAdapter.disabled) { try { dsmNotifySink(text, kind); return } catch (e) { /* fall through */ } }
+  let done = false
+  try { for (const fn of dsmNoticeHooks) { fn(text, kind); done = true } } catch (e) {}
+  if (!done) { try { console.warn('[dsh-sessions-manager] ' + text) } catch (e) {} }
+}
+function dsmOnNotice(fn) { dsmNoticeHooks.add(fn); return () => dsmNoticeHooks.delete(fn) }
 // 空白会话一律隐藏（原「纯净视图」的默认行为固化为唯一行为，开关已于
 // 0.1.3 移除：上游本就不把空白会话渲染进侧栏，开关没有可服务的场景）。
 // 只隐藏，永不删除；子代理行按 DSH 设计不进侧栏（ui-subagent README 明文
@@ -1708,6 +1762,18 @@ async function dsmLoadTrashIds() {
     dsmWarmPending = !!(r && r.warmPending)
     dsmRefinePending = !!(r && r.refinePending)
     if (wasBusy && !(dsmWarmPending || dsmRefinePending)) { try { for (const fn of dsmWarmDoneHooks) fn() } catch (e) { /* hook 出错不断主流程 */ } }
+    // T2：投递计划（最多 2 条 + 省略句）——先同步写已见再弹（同浏览器第二个 tab
+    // 立刻看不到重复），ack 尽力清理（旧 host 无此路由 → 404 静默）。
+    {
+      const plan = noticeToastPlan(r && r.moveNotices, dsmLoadSeenNotices(), 2)
+      if (plan.ackIds.length) {
+        const seen = dsmLoadSeenNotices()
+        for (const id of plan.ackIds) seen.add(id)
+        dsmSaveSeenNotices(seen)
+        dsmNotify(plan.text, plan.kind)
+        postJSON('/archived-sessions/pending-moves/notices/ack', { ids: plan.ackIds }).catch(() => {})
+      }
+    }
     if (dsmRepaintDots) dsmRepaintDots()
   } catch (e) {
     /* keep last known set */
@@ -2378,10 +2444,15 @@ function installSidebarStatusDots() {
     const t = document.createElement('div')
     t.className = 'dsm-toast' + (kind === 'err' ? ' dsm-toast-err' : '')
     t.textContent = msg
-    t.style.cssText = 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);max-width:80%;padding:8px 14px;border-radius:8px;background:#2C2C2A;color:#F1EFE8;font-size:12px;line-height:1.5;z-index:9999'
+    t.setAttribute('role', 'status')
+    t.style.cssText = 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);max-width:80%;padding:8px 14px;border-radius:8px;background:#2C2C2A;color:#F1EFE8;font-size:12px;line-height:1.5;z-index:9999;cursor:pointer'
+    t.addEventListener('click', () => t.remove())
     document.body.appendChild(t)
-    setTimeout(() => t.remove(), 4200)
+    // T2：排队结果文案动辄几十字，固定 4200ms 读不完（3.6.0 已为面板 toast 立过
+    // toastDurationFor，这里把侧栏通道并进来）。
+    setTimeout(() => t.remove(), toastDurationFor(msg, kind))
   }
+  dsmNotifySink = paintToast
   // ---- 侧栏就地展开子代理（issue #6）------------------------------------
   // DSH 按设计不渲染子代理行（ui-subagent 明文 "omitted from the ordinary
   // sidebar"），所以插件自己把它们在父行下方补渲染出来：点击徽标就地展开，
@@ -2568,6 +2639,7 @@ function installSidebarStatusDots() {
     clearInterval(tickTimer)
     clearTimeout(coldSecondBeat)
     obs.disconnect()
+    dsmNotifySink = null
     dsmTeardownSidebarAug()
   }
 }
@@ -2611,7 +2683,7 @@ function installSidebarWorkspaceDrag() {
     el.setAttribute('role', 'status')
     el.textContent = message
     document.body.appendChild(el)
-    setTimeout(() => el.remove(), 2600)
+    setTimeout(() => el.remove(), toastDurationFor(message))  // T2：并轨按字数定时
   }
   const clearVisuals = () => {
     document.querySelectorAll('.dsm-drag-source,.dsm-drop-target').forEach((el) => el.classList.remove('dsm-drag-source', 'dsm-drop-target'))

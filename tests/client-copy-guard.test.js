@@ -27,6 +27,13 @@ test('「血统」已从全部用户可见文案与代码注释中清除（基�
   assert.ok(SRC_CLIENT.includes('>血缘</div>'), '详情卡片小节标题应为「血缘」')
 })
 
+test('T2 并轨：侧栏/拖拽 toast 按字数定时，排队移动通知只走 dsmNotify 唯一出口', () => {
+  assert.match(SRC_CLIENT, /const paintToast = \(msg, kind\)[\s\S]{0,900}toastDurationFor\(msg, kind\)/, '侧栏 toast 必须按字数定时')
+  assert.match(SRC_CLIENT, /dsmNotifySink = paintToast/, '侧栏须注册为通知 sink')
+  assert.match(SRC_CLIENT, /noticeToastPlan\(r && r\.moveNotices[\s\S]{0,700}dsmNotify\(plan\.text/, 'moveNotices 只能经 dsmNotify 唯一出口投递')
+  assert.match(SRC_CLIENT, /setTimeout\(\(\) => el\.remove\(\), toastDurationFor\(message\)\)/, '拖拽 toast 同样并轨')
+})
+
 test('「纯净视图」不再出现在任何渲染文案里（该开关 0.1.3 已移除）', () => {
   for (const line of SRC_CLIENT.split('\n')) {
     if (!line.includes('纯净视图')) continue

@@ -15,6 +15,7 @@ import { rewriteFrame0CwdInMemory, scanZstdFrames } from './zstd-frame.js'
 import { createSessionMarkdownBuilder } from './markdown.js'
 import { createStarIndex } from './star-index.js'
 import { createPendingMoveStore } from './pending-moves.js'
+import { createMoveNoticeStore } from './move-notices.js'
 import { sweepStaleStateTemps } from './state-temp-sweep.js'
 import { aggregateStorage } from './storage-stats.js'
 import { createAutoArchiveStore, pickInactiveCandidates } from './auto-archive.js'
@@ -581,6 +582,9 @@ export function apply(ctx) {
   // 待移动队列：会话被占用（DSH 打开中）时登记，等它释放后自动完成移动。
   // 见 src/pending-moves.js 的模块注释（0.1.5 单写者锁没有公共释放 API）。
   const pendingMoves = createPendingMoveStore()
+  // T2：排队移动的后台终局（完成/放弃）落成持久通知，sidebar-state 带出、
+  // client 弹出后 ack 清除。独立于队列文件（终局与队列项同生死，挂条目上观察不到）。
+  const moveNotices = createMoveNoticeStore()
   // Auto-archive settings live in their own schema-v4 store, off by default.
   const autoArchive = createAutoArchiveStore()
   // 启动清扫：进程在「写临时文件 → rename」之间被杀会留下 .<name>-<pid>-<ts>.tmp
@@ -1224,11 +1228,17 @@ export function apply(ctx) {
           metaCache.invalidate(item.sessionId)
           moved++
           notes.push(`排队中的移动已完成：${String(item.sessionId).slice(0, 18)}…`)
+          // T2：通知落盘失败不吞掉移动结果本身（队列项已删，回滚代价不值——
+          // 保留 console.warn 作最后兜底，这是刻意接受的静默缺口）。
+          try { await moveNotices.append({ kind: 'moved', sessionId: item.sessionId, targetPath: item.targetPath, at: Date.now() }) } catch (e) { /* best-effort */ }
         } catch (e) {
           if (isBusyError(e)) continue // 仍被占用：留在队列里，等下一次触发
           if (Date.now() - bootedAt < BOOT_WARMUP_MS) continue // boot 期未就绪：不记失败
           const bumped = await pendingMoves.bumpAttempts(item.sessionId)
-          if (bumped && bumped.dropped) notes.push(`排队中的移动多次失败已放弃：${String(item.sessionId).slice(0, 18)}…（${String((e && e.message) || e)}）`)
+          if (bumped && bumped.dropped) {
+            notes.push(`排队中的移动多次失败已放弃：${String(item.sessionId).slice(0, 18)}…（${String((e && e.message) || e)}）`)
+            try { await moveNotices.append({ kind: 'abandoned', sessionId: item.sessionId, targetPath: item.targetPath, at: Date.now(), attempts: bumped.attempts, reason: String((e && e.message) || e).split('\n')[0] }) } catch (err) { /* best-effort */ }
+          }
         }
       }
       if (moved > 0) { try { await reindexRegistry() } catch (e) { /* best-effort */ } }
@@ -1612,7 +1622,7 @@ export function apply(ctx) {
       const rec = emptyScanCache.get(key)
       if (!rec || !emptyScanCandidate(rec.sizeBytes)) emptyScanCache.delete(key)
     }
-    return {
+    const payload = {
       titles: Object.fromEntries(authorityTitleCache),
       trashedSessionIds: store.items.map((item) => String(item.sessionId)),
       purgedSessionIds: activeTombstones,
@@ -1624,6 +1634,13 @@ export function apply(ctx) {
       // 时恒 false——永久 busy 会让 client 疯轮询，这是唯一现实的假忙陷阱。
       refinePending: refinePendingNow(),
     }
+    // T2：有未确认的排队移动终局才带出（空则省略字段——与「普通会话不产生条目」
+    // 同风格的载荷最小化；旧 client 对未知字段天然忽略）。
+    try {
+      const noticeRows = await moveNotices.list()
+      if (noticeRows.length) payload.moveNotices = noticeRows
+    } catch (e) { /* 通知通道坏了不影响侧栏主数据 */ }
+    return payload
   }
 
   // 空会话判定缓存（进程内）：id → { sizeBytes, empty }。日志没变（sizeBytes
@@ -2408,6 +2425,24 @@ export function apply(ctx) {
           const ids = parseIds(body)
           if (!ids || ids.length === 0) return json(res, { ok: false, error: 'missing sessionIds' }, 400)
           const removed = await pendingMoves.remove(ids)
+          json(res, { ok: true, removed })
+        } catch (e) {
+          json(res, { ok: false, error: String((e && e.message) || e) }, errorStatus(e))
+        }
+      },
+    }))
+
+    // T2：ack 已展示的排队移动通知（尽力清理；失败无害，client 端 localStorage
+    // 已见集合负责多 tab 去重，7 天 TTL 兜底）。
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/archived-sessions/pending-moves/notices/ack',
+      handler: async (req, res) => {
+        try {
+          const body = await readJsonBody(req)
+          const ids = body && Array.isArray(body.ids) ? body.ids : null
+          if (!ids || !ids.length) return json(res, { ok: false, error: 'missing ids' }, 400)
+          const removed = await moveNotices.ack(ids)
           json(res, { ok: true, removed })
         } catch (e) {
           json(res, { ok: false, error: String((e && e.message) || e) }, errorStatus(e))

@@ -177,3 +177,46 @@ export function toastDurationFor(text, kind) {
   const scaled = kind === 'err' ? Math.round(readingMs * 1.25) : readingMs
   return Math.min(TOAST_MAX_MS, Math.max(TOAST_MIN_MS, scaled))
 }
+
+// —— T2（3.7.0）：排队移动终局通知的文案与投递计划（纯函数，可 node --test）——
+// host 把每次后台终局（成功/放弃）落成通知经 sidebar-state 带出；client 用本地
+// 已见集合过滤后弹一次 toast，并 ack 已展示项。投递策略全部收敛在这里，
+// index.jsx 只做接线。
+
+export function pathTail(p) {
+  const parts = String(p == null ? '' : p).split(/[\\/]+/).filter(Boolean)
+  return parts.length ? parts[parts.length - 1] : ''
+}
+
+export function moveNoticeText(n) {
+  const id = shortId(n && n.sessionId)
+  if (n && n.kind === 'moved') {
+    const where = pathTail(n.targetPath)
+    return `排队中的移动已完成：${id}${where ? ` → 「${where}」` : ''}`
+  }
+  const reason = String((n && n.reason) || '').split('\n')[0].slice(0, 120)
+  return `排队中的移动多次失败已放弃：${id}${reason ? `（${reason}）` : ''}，可在 设置 → 会话管理 → 待移动队列 重新发起移动`
+}
+
+/**
+ * 一次侧栏拉取里的通知投递计划。
+ * @param raw      sidebar-state 的 moveNotices 数组（可能缺失/畸形——一律宽容）
+ * @param seenIds  本浏览器已展示过的通知 id 集合（多 tab 即时去重）
+ * @param max      单次最多展示几条真实通知，超出并入省略句
+ * @returns {{ text: string|null, kind: 'ok'|'err', ackIds: string[] }}
+ *          ackIds 只含**已展示**项——未展示的留在服务端，下一拍继续（TTL 兜底）。
+ */
+export function noticeToastPlan(raw, seenIds, max = 2) {
+  const list = (Array.isArray(raw) ? raw : [])
+    .filter((n) => n && typeof n.id === 'string' && typeof n.sessionId === 'string' && (n.kind === 'moved' || n.kind === 'abandoned') && !seenIds.has(String(n.id)))
+    .sort((a, b) => (a.at || 0) - (b.at || 0))
+  if (!list.length) return { text: null, kind: 'ok', ackIds: [] }
+  const shown = list.slice(Math.max(0, list.length - Math.max(1, max)))
+  const parts = shown.map(moveNoticeText)
+  if (list.length > shown.length) parts.push(`另有 ${list.length - shown.length} 条排队移动的结果，见 设置 → 会话管理 → 待移动队列`)
+  return {
+    text: parts.join('；'),
+    kind: shown.some((n) => n.kind === 'abandoned') ? 'err' : 'ok',
+    ackIds: shown.map((n) => String(n.id)),
+  }
+}
