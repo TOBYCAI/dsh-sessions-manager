@@ -1542,9 +1542,6 @@ function SessionPanel({ workspacesSvc }) {
             </div>
           </div>
 
-          {/* T4 标签管理 sheet：照自动归档/待移动队列的 mv-sheet 先例。
-              每行 = 名字 / 用量 / 重命名（内联输入）/ 并入 select + 确认 / 删除。
-              删除确认文案含「只删标签，不会删除会话」红线（logic.tagDeleteConfirm）。 */}
 
           {/* 维护栏是面板级工具，与当前查看哪一组会话无关，故所有视图都显示。 */}
           <div className="maint-bar">
@@ -1566,6 +1563,9 @@ function SessionPanel({ workspacesSvc }) {
               {aa.lastRunAt ? <span className="maint-note">上次检查 {fmtDate(aa.lastRunAt)}，归档 {aa.lastArchivedCount} 个</span> : <span className="maint-note">尚未检查</span>}
           </div>
 
+          {/* T4 标签管理 sheet：照自动归档/待移动队列的 mv-sheet 先例。
+              每行 = 名字 / 用量 / 重命名（内联输入）/ 并入 select + 确认 / 删除。
+              删除确认文案含「只删标签，不会删除会话」红线（logic.tagDeleteConfirm）。 */}
           {openTagMgr && (
             <div className="mv-sheet" aria-label="标签管理">
               <div className="mv-sheet-head">
