@@ -1539,8 +1539,19 @@ function SessionPanel({ workspacesSvc }) {
               <button type="button" className="sess-farrow" aria-expanded={moreOpen} aria-label={moreOpen ? '收起更多筛选' : '展开更多筛选'} title={moreOpen ? '收起更多筛选' : '展开更多筛选（已收藏 / 空白 / 回收站）'} onClick={() => setMoreOpen(!moreOpen)}>
                 <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2l4 4-4 4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/></svg>
               </button>
-              {/* T4：标签管理入口——低频操作，做成折叠区之后的普通按钮，
-                  不新增顶层视图 tab（UI 红线）。 */}
+            </div>
+          </div>
+
+          {/* T4 标签管理 sheet：照自动归档/待移动队列的 mv-sheet 先例。
+              每行 = 名字 / 用量 / 重命名（内联输入）/ 并入 select + 确认 / 删除。
+              删除确认文案含「只删标签，不会删除会话」红线（logic.tagDeleteConfirm）。 */}
+
+          {/* 维护栏是面板级工具，与当前查看哪一组会话无关，故所有视图都显示。 */}
+          <div className="maint-bar">
+              <button type="button" className="archv-btn" aria-expanded={storageOpen} onClick={() => { const next = !storageOpen; setStorageOpen(next); if (next && (!storage || storageDirty.current) && !storageBusy) loadStorage() }}>
+                存储占用{storage ? ` · ${fmtBytes(storage.totalBytes) || '0 B'}` : ''}
+              </button>
+              {/* 标签管理：面板级低频工具（v3.7.x 从筛选行移入维护栏，存储占用右边）；不新增顶层视图 tab（UI 红线）。 */}
               <button
                 type="button"
                 className="archv-btn"
@@ -1549,12 +1560,12 @@ function SessionPanel({ workspacesSvc }) {
                 title={tagsReady ? '新建 / 重命名 / 合并 / 删除标签' : tagsBlockedTitle}
                 onClick={() => { setOpenTagMgr(!openTagMgr); setRenamingTagId(null) }}
               >标签管理{tagsReady && tagDefs.length ? ` (${tagDefs.length})` : ''}</button>
-            </div>
+              <button type="button" className={'archv-btn' + (aa.settings.inactiveDays ? ' archv-go' : '')} aria-expanded={aaOpen} onClick={() => setAaOpen(!aaOpen)}>
+                自动归档{aa.settings.inactiveDays ? `：${aa.settings.inactiveDays} 天未活跃` : '：未启用'}
+              </button>
+              {aa.lastRunAt ? <span className="maint-note">上次检查 {fmtDate(aa.lastRunAt)}，归档 {aa.lastArchivedCount} 个</span> : <span className="maint-note">尚未检查</span>}
           </div>
 
-          {/* T4 标签管理 sheet：照自动归档/待移动队列的 mv-sheet 先例。
-              每行 = 名字 / 用量 / 重命名（内联输入）/ 并入 select + 确认 / 删除。
-              删除确认文案含「只删标签，不会删除会话」红线（logic.tagDeleteConfirm）。 */}
           {openTagMgr && (
             <div className="mv-sheet" aria-label="标签管理">
               <div className="mv-sheet-head">
@@ -1636,17 +1647,6 @@ function SessionPanel({ workspacesSvc }) {
               <div className="dtl-note">标签是会话的自定义标记：新建、重命名、合并、删除都只改标记本身，不会删除或移动任何会话。单个会话的标签数量与标签总数都有服务端上限，超限时会提示并自动回退本地改动。</div>
             </div>
           )}
-
-          {/* 维护栏是面板级工具，与当前查看哪一组会话无关，故所有视图都显示。 */}
-          <div className="maint-bar">
-              <button type="button" className="archv-btn" aria-expanded={storageOpen} onClick={() => { const next = !storageOpen; setStorageOpen(next); if (next && (!storage || storageDirty.current) && !storageBusy) loadStorage() }}>
-                存储占用{storage ? ` · ${fmtBytes(storage.totalBytes) || '0 B'}` : ''}
-              </button>
-              <button type="button" className={'archv-btn' + (aa.settings.inactiveDays ? ' archv-go' : '')} aria-expanded={aaOpen} onClick={() => setAaOpen(!aaOpen)}>
-                自动归档{aa.settings.inactiveDays ? `：${aa.settings.inactiveDays} 天未活跃` : '：未启用'}
-              </button>
-              {aa.lastRunAt ? <span className="maint-note">上次检查 {fmtDate(aa.lastRunAt)}，归档 {aa.lastArchivedCount} 个</span> : <span className="maint-note">尚未检查</span>}
-          </div>
           {pendingQueue.length > 0 && (
             <div className="mv-sheet" aria-label="待移动队列">
               <div className="mv-sheet-head">
