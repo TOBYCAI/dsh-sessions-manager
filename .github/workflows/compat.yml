@@ -100,19 +100,9 @@ jobs:
         run: |
           corepack enable
           pnpm install --frozen-lockfile
-      - name: Build harness packages (scoped to the persistence backend)
+      - name: Build harness packages
         working-directory: harness
-        # 只构建 compat-runtime.mjs 真正 import 的目标包及其 workspace 依赖
-        # （persistence-jsonl / persistence + cordis / session / session-format）。
-        # 刻意不用 `pnpm -r build`：那会连 apps/web 等无关前端一起构建。上游 rc 里
-        # 前端一旦有编译问题（实测 dsh-web-frontend@0.1.5-rc.2 缺 worker import），
-        # 构建步骤会在跑到冒烟之前先崩，于是我们既收不到「适配层 vs 官方持久化契约
-        # 是否漂移」这个真信号，开出来的 issue 又误指「适配层可能漂移」——是噪声。
-        # 收窄到目标包+依赖后：前端坏不坏与冒烟无关，真漂移才会让冒烟步骤本身失败。
-        run: |
-          pnpm --filter "@deepseek-ai/dsh-session-persistence-jsonl..." \
-               --filter "@deepseek-ai/dsh-session-persistence..." \
-               run build
+        run: pnpm -r build
       - name: Run real-runtime compat smoke
         id: smoke
         run: node scripts/compat-runtime.mjs "$GITHUB_WORKSPACE/harness"
