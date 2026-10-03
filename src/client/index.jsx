@@ -112,7 +112,9 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
    分支（绿）/空白（灰），名字超长省略号；+N 计数 chip 中性色。 */
 .dsm-tagchip{display:inline-flex;align-items:center;flex:none;max-width:9em;min-height:22px;padding:0 8px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary,#EAB308) 45%,transparent);border-radius:var(--dsm-radius-tag);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#EAB308) 10%,transparent);color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:500;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dsm-tagchip-more{max-width:none;color:var(--dsw-alias-label-tertiary);border-color:var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-subtle)}
-.archv-id{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px;color:var(--dsw-alias-label-tertiary);flex:none;margin-left:auto;white-space:nowrap}
+.archv-id{appearance:none;border:none;background:none;padding:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px;color:var(--dsw-alias-label-tertiary);flex:none;margin-left:auto;white-space:nowrap;cursor:pointer;transition:color .12s ease}
+.archv-id:hover{color:var(--dsw-alias-label-secondary)}
+.archv-id-copied{color:var(--dsw-alias-state-business-primary)}
 .archv-dot{color:var(--dsw-alias-border-l3);flex:none}
 .archv-check{width:15px;height:15px;accent-color:var(--dsw-alias-state-business-primary);flex:none;cursor:pointer}
 .archv-star{appearance:none;width:22px;height:22px;flex:none;display:inline-flex;align-items:center;justify-content:center;border:none;background:0 0;padding:0;line-height:0;color:var(--dsw-alias-label-tertiary);cursor:pointer;border-radius:50%;transition:color .15s ease,transform .12s ease}
@@ -934,6 +936,37 @@ function SessionPanel({ workspacesSvc }) {
         showToast('复制失败，完整版本号：' + full, 'err')
       }
     }
+  }
+
+  // 点击行尾短 ID 复制完整会话 ID。clipboard API 优先（desktop/web 的页面都来自
+  // localhost，属安全上下文），失败回退 execCommand；成功把短 ID 短暂换成「已复制」
+  // 作就近反馈，两条路径全失败时把完整 ID 亮进 toast 供手抄（与上方徽章的失败终点
+  // 同一思路）。
+  const copiedTimer = useRef(null)
+  const [copiedId, setCopiedId] = useState(null)
+  const copySessionId = (id) => {
+    const markCopied = () => {
+      setCopiedId(id)
+      if (copiedTimer.current) clearTimeout(copiedTimer.current)
+      copiedTimer.current = setTimeout(() => setCopiedId(null), 1400)
+    }
+    const viaExecCommand = () => {
+      try {
+        const ta = document.createElement('textarea')
+        ta.value = id
+        ta.setAttribute('readonly', '')
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0'
+        document.body.appendChild(ta)
+        ta.select()
+        const ok = document.execCommand('copy')
+        ta.remove()
+        if (ok) markCopied()
+        else showToast('复制失败，完整 ID：' + id, 'err')
+      } catch (e) { showToast('复制失败，完整 ID：' + id, 'err') }
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(id).then(markCopied).catch(viaExecCommand)
+    } else viaExecCommand()
   }
 
   const refresh = () => {
@@ -2162,7 +2195,7 @@ function SessionPanel({ workspacesSvc }) {
                             {tagChips(it.sessionId)}
                             {kidsBadge(it.sessionId)}
                             {branchGroupBadge(it.sessionId)}
-                            <span className="archv-id" title={it.sessionId}>{shortId(it.sessionId)}</span>
+                            <button type="button" className={'archv-id' + (copiedId === it.sessionId ? ' archv-id-copied' : '')} title={it.sessionId + '（点击复制完整 ID）'} aria-label={'复制会话 ID ' + it.sessionId} onClick={(e) => { e.stopPropagation(); copySessionId(it.sessionId) }}>{copiedId === it.sessionId ? '已复制' : shortId(it.sessionId)}</button>
                           </div>
                           <div className="archv-meta">
                             {it.archived ? <span className="archv-wtag archv-wgone">已归档</span> : <span className="archv-wtag archv-active">活动</span>}
