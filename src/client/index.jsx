@@ -21,6 +21,21 @@ function loadPanelPrefs() {
 }
 
 const CSS = `
+/* 兼容 shim（2026-09-30 对 0.2.0-rc.2 实测）：当前 runtime 的设计令牌不再提供
+   fill-elevated / fill-subtle / fill-secondary / label-inverted / state-warning-primary
+   这几个 alias，缺位会让输入框、下拉框、卡片、徽标整体回退成透明。这里把它们重映射
+   到 runtime 现有 token（官方 Input/Pill 分别用 bg-layer-1 / bg-layer-2）。选择器用
+   :where(:root)（零特异性）：runtime 将来恢复官方定义时自动胜出，shim 只在缺位时兜底。
+   state-warning-primary 是旧名，现名为 state-warn-primary。 */
+:where(:root){--dsw-alias-fill-elevated:var(--dsw-alias-bg-layer-2);--dsw-alias-fill-subtle:var(--dsw-alias-bg-layer-1);--dsw-alias-fill-secondary:var(--dsw-alias-bg-layer-2);--dsw-alias-label-inverted:var(--dsw-alias-label-primary-foreground);--dsw-alias-state-warning-primary:var(--dsw-alias-state-warn-primary)}
+/* 原生 <select> 的弹出列表由 Chromium 按 color-scheme 绘制，不声明时暗色主题下
+   仍是白底，叠加未适配的文字色导致不可读；跟随 DSH 的暗色主题标记切换。 */
+.archv{color-scheme:light}
+body[data-ds-dark-theme] .archv{color-scheme:dark}
+/* 兜底：原生弹层行的配色直接写在 option 上（Chromium 按 option 自身的
+   background/color 绘制弹层），即使 color-scheme 判定被扩展或环境干扰，
+   暗色下也不会出现白底配浅色文字的不可读组合。 */
+.archv option{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}
 .archv{--dsm-radius-tag:9px;--dsm-radius-ctl:9px;--dsm-radius-sheet:10px;--dsm-radius-card:12px;display:flex;flex-direction:column;gap:4px;max-width:800px;padding:8px 2px 28px}
 .archv-head{display:flex;align-items:center;gap:10px;margin:0 0 2px}
 .archv-title{font-size:16px;font-weight:650;color:var(--dsw-alias-label-primary);letter-spacing:-0.01em;margin:0}
@@ -2431,7 +2446,7 @@ const SIDEBAR_AUG_CSS = `
 .dsm-toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:2147483601;background:Canvas;color:CanvasText;border:1px solid color-mix(in srgb,CanvasText 25%,transparent);padding:9px 16px;border-radius:999px;font-size:12px;box-shadow:0 8px 24px rgb(0 0 0/.25);max-width:min(92vw,460px);cursor:pointer}
 .dsm-toast-long{border-radius:14px;text-align:left;line-height:18px}
 .dsm-toast-err{background:#4A1D1D;color:#FFD9D9;border:1px solid var(--dsw-alias-state-error-primary)}
-.dsm-sub{position:fixed;z-index:1100;box-sizing:border-box;min-width:190px;max-width:320px;padding:4px;display:flex;flex-direction:column;gap:0;background:var(--dsw-specific-menu);border:1px solid var(--dsw-alias-border-inverted);border-radius:12px;box-shadow:var(--dsw-shadow-lv3)}
+.dsm-sub{position:fixed;z-index:1100;box-sizing:border-box;min-width:190px;max-width:320px;padding:4px;display:flex;flex-direction:column;gap:0;background:var(--dsw-specific-menu);backdrop-filter:var(--dsw-menu-backdrop-filter,blur(40px) saturate(150%));border:1px solid var(--dsw-alias-border-inverted);border-radius:12px;box-shadow:var(--dsw-shadow-lv3)}
 .dsm-sub-loading,.dsm-sub-empty{font-size:12px;color:var(--dsw-alias-label-tertiary);padding:6px 10px}
 .dsm-sub-err{font-size:12px;color:var(--dsw-alias-state-error-primary);padding:6px 10px}
 .dsm-sub-item{display:flex;align-items:center;gap:8px;width:100%;min-height:36px;padding:6px 10px;border:none;border-radius:8px;background:transparent;cursor:pointer;font-size:13px;line-height:18px;color:var(--dsw-alias-label-primary);text-align:left}

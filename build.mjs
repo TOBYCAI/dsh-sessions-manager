@@ -12,7 +12,6 @@
 import { build } from 'esbuild'
 import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
 
 mkdirSync('lib', { recursive: true })
 
@@ -31,7 +30,9 @@ const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
 const sourceFiles = []
 const walk = (dir) => {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const abs = join(dir, entry.name)
+    // 哈希输入用正斜杠路径：join() 在 Windows 会产出反斜杠，指纹随平台漂移，
+    // CI（Linux）重建比对必挂。node 的 fs 在 Windows 同样接受正斜杠，读写不受影响。
+    const abs = `${dir}/${entry.name}`
     if (entry.isDirectory()) walk(abs)
     else if (/\.(js|jsx|mjs|json)$/.test(entry.name)) sourceFiles.push(abs)
   }
