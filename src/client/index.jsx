@@ -4245,6 +4245,117 @@ function installSidebarWorkspaceDrag() {
   }
 }
 
+/**
+ * 拖拽自动滚动：会话列表经常比侧栏高得多，把会话往列表顶端（或底端）拖时，
+ * 视口外的工作区标题够不着。这里只观察原生 drag 事件、只滚侧栏里那个含
+ * role="tree" 的滚动容器，不参与、也不改变 DSH 自己的拖放判定。
+ * 装到 globalThis 上并带版本号：插件 HMR 会重建模块实例，重复安装会让
+ * 滚动速度和监听器成倍叠加。
+ */
+const DRAG_AUTO_SCROLL_VERSION = 1
+const DRAG_AUTO_SCROLL_KEY = Symbol.for('dsh.sessions-manager.drag-auto-scroll')
+const DRAG_AUTO_SCROLL_EDGE = 64
+const DRAG_AUTO_SCROLL_MAX_STEP = 20
+const DRAG_AUTO_SCROLL_HOVER_SYNC_MS = 120
+
+function installSidebarDragAutoScroll() {
+  if (typeof document === 'undefined' || typeof window === 'undefined') return
+  const current = globalThis[DRAG_AUTO_SCROLL_KEY]
+  if (current !== undefined && current.version === DRAG_AUTO_SCROLL_VERSION) return
+  if (current !== undefined && typeof current.dispose === 'function') current.dispose()
+  const state = { active: false, x: 0, y: 0, raf: 0, container: null, lastHoverSync: 0 }
+  const isSidebarList = (el) => el.getAttribute('role') === 'tree' || el.querySelector('[role="tree"]') !== null
+  const scrollableAncestor = (node) => {
+    let el = node instanceof Element ? node : null
+    while (el !== null && el !== document.body && el !== document.documentElement) {
+      const overflowY = window.getComputedStyle(el).overflowY
+      if ((overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') && el.scrollHeight - el.clientHeight > 1 && isSidebarList(el)) return el
+      el = el.parentElement
+    }
+    return null
+  }
+  const resolveContainer = (target) => {
+    const direct = scrollableAncestor(target)
+    if (direct !== null) return direct
+    // 光标停在列表上方（侧栏标题一带）时 target 已经不在列表里；只要水平位置
+    // 还在侧栏那一列，就仍然滚这个列表——和文件管理器把文件拖到面板顶端一致。
+    const tree = document.querySelector('[role="tree"]')
+    if (tree === null) return null
+    const rect = tree.getBoundingClientRect()
+    if (state.x < rect.left || state.x > rect.right) return null
+    return scrollableAncestor(tree)
+  }
+  const speedAt = (container) => {
+    const rect = container.getBoundingClientRect()
+    const zone = Math.min(DRAG_AUTO_SCROLL_EDGE, Math.max(24, rect.height * 0.25))
+    if (state.y < rect.top + zone) return -Math.ceil(DRAG_AUTO_SCROLL_MAX_STEP * Math.min(1, (rect.top + zone - state.y) / zone))
+    if (state.y > rect.bottom - zone) return Math.ceil(DRAG_AUTO_SCROLL_MAX_STEP * Math.min(1, (state.y - (rect.bottom - zone)) / zone))
+    return 0
+  }
+  // 滚动之后光标下的行换了，浏览器不会补发 dragover；补一条合成事件，让目标
+  // 高亮（本插件）与插入标记（DSH 原生排序）跟着滚动后的位置走。
+  const syncHover = () => {
+    const now = Date.now()
+    if (now - state.lastHoverSync < DRAG_AUTO_SCROLL_HOVER_SYNC_MS) return
+    state.lastHoverSync = now
+    if (typeof DragEvent !== 'function' || typeof DataTransfer !== 'function') return
+    const target = document.elementFromPoint(state.x, state.y)
+    if (target === null) return
+    try {
+      target.dispatchEvent(new DragEvent('dragover', {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        clientX: state.x,
+        clientY: state.y,
+        dataTransfer: new DataTransfer(),
+      }))
+    } catch (error) { /* 合成事件失败不影响滚动本身 */ }
+  }
+  const tick = () => {
+    state.raf = 0
+    if (!state.active) return
+    const container = state.container
+    if (container !== null && container.isConnected) {
+      const step = speedAt(container)
+      if (step !== 0) {
+        const before = container.scrollTop
+        container.scrollTop = before + step
+        if (container.scrollTop !== before) syncHover()
+      }
+    }
+    state.raf = window.requestAnimationFrame(tick)
+  }
+  const stop = () => {
+    state.active = false
+    state.container = null
+    if (state.raf !== 0) window.cancelAnimationFrame(state.raf)
+    state.raf = 0
+  }
+  const onDragOver = (event) => {
+    if (event.clientX === 0 && event.clientY === 0) return
+    state.x = event.clientX
+    state.y = event.clientY
+    state.active = true
+    if (state.container === null || !state.container.isConnected) state.container = resolveContainer(event.target instanceof Element ? event.target : null)
+    if (state.container !== null && state.raf === 0) state.raf = window.requestAnimationFrame(tick)
+  }
+  document.addEventListener('dragover', onDragOver, true)
+  document.addEventListener('dragend', stop, true)
+  document.addEventListener('drop', stop, true)
+  window.addEventListener('blur', stop)
+  globalThis[DRAG_AUTO_SCROLL_KEY] = {
+    version: DRAG_AUTO_SCROLL_VERSION,
+    dispose: () => {
+      document.removeEventListener('dragover', onDragOver, true)
+      document.removeEventListener('dragend', stop, true)
+      document.removeEventListener('drop', stop, true)
+      window.removeEventListener('blur', stop)
+      stop()
+    },
+  }
+}
+
 export function apply(ctx) {
   dsmClientCtx = ctx
   dsmLoadCapabilities()
@@ -4269,6 +4380,14 @@ export function apply(ctx) {
   const disposeSidebarDots = installSidebarStatusDots()
   if (disposeSidebarDots) ctx.effect(() => disposeSidebarDots)
   installSidebarWorkspaceDrag()
+  installSidebarDragAutoScroll()
+  // 自动滚动只挂原生 drag 监听，同样要在插件停用/HMR 时摘干净，避免重复安装。
+  ctx.effect(() => () => {
+    const installed = globalThis[DRAG_AUTO_SCROLL_KEY]
+    if (installed === undefined || installed.version !== DRAG_AUTO_SCROLL_VERSION) return
+    installed.dispose()
+    delete globalThis[DRAG_AUTO_SCROLL_KEY]
+  })
   const workspacesSvc = ctx.get('workspaces')
   ctx.slots.inject('settings.section', () =>
     ctx.slots.register(
