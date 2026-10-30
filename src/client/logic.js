@@ -563,6 +563,18 @@ export function aliveSessionCount(sessions, hiddenIds) {
   return seen === 0 ? null : alive
 }
 
+// 空分组隐藏的最终裁决：`containsCurrent` 是上游分组节点上的既有字段
+// （`containsCurrent: g.key === currentGroup`，0.1.5 起各代都在），表示当前会话
+// 是否就住在这个分组里。
+// - 当前会话在本组 → 绝不藏。藏掉它等于同时藏掉用户此刻的位置与「+ 新建对话」
+//   入口；而上游只渲染「当前会话」那一条 blank 行、插件又把 blank 行一律隐藏，
+//   于是组内可见数为 0，正好撞上 aliveCount === 0 的隐藏条件——整组消失即由此而来。
+// - `aliveCount` 沿用 aliveSessionCount 的三态纪律：null=不知道 → 不藏。
+export function shouldHideEmptyGroup(aliveCount, containsCurrent) {
+  if (containsCurrent === true) return false
+  return aliveCount === 0
+}
+
 // 拖拽自动滚动：光标进入滚动容器上/下感应带时每帧该滚多少（负=向上，正=向下，0=不动）。
 // 纯数学，DOM 侧只负责取 rect 与 scrollTop，测试见 tests/client-logic.test.js。
 // - 感应带 = min(edge, max(minZone, height*0.25))：长列表用固定的 edge，矮容器按比例

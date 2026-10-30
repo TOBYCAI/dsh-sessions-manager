@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { aliveSessionCount, applyTagFilter, ascBranchTime, authoritativeTitleForFirstPaint, branchTimeKey, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dotStateFor, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, moveNoticeText, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, starredOf, tagDeleteConfirm, titleBackfillDecision, TOAST_MAX_MS, TOAST_MIN_MS, toastDurationFor, workspaceForNodes } from '../src/client/logic.js'
+import { aliveSessionCount, applyTagFilter, ascBranchTime, authoritativeTitleForFirstPaint, branchTimeKey, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dotStateFor, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, moveNoticeText, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, shouldHideEmptyGroup, starredOf, tagDeleteConfirm, titleBackfillDecision, TOAST_MAX_MS, TOAST_MIN_MS, toastDurationFor, workspaceForNodes } from '../src/client/logic.js'
 
 // ---- dotStateFor：状态点语义 ----------------------------------------------
 // 历史回归：DSH 把 running 报成 ongoing（9766476）；done 在当前行上不能亮绿
@@ -823,6 +823,25 @@ test('alive count reports unknown instead of empty for missing or empty data', (
   assert.equal(aliveSessionCount('nope', new Set()), null)
   // 没有一条带 id（结构不认识）→ 同样是「不知道」，不是「组空」。
   assert.equal(aliveSessionCount([{ id: null }, { nope: 1 }], new Set()), null)
+})
+
+// ---- shouldHideEmptyGroup：当前会话所在分组绝不隐藏 --------------------------
+// 回归：上游只渲染「当前会话」那一条 blank 行，插件又把 blank 行隐藏，于是
+// aliveSessionCount 判出 0；若据此藏组，用户展开并点开的工作区会连标题行一起
+// 从侧栏消失（用户失去位置与「+ 新建对话」入口，数据其实完好）。
+test('empty-group hiding never takes the group that holds the current session', () => {
+  // 本缺陷的最小复现条件：组内只剩空白 / 回收站会话 → aliveCount 为 0。
+  assert.equal(shouldHideEmptyGroup(0, true), false)
+  // 当前会话不在本组时，原有判空语义保持不变。
+  assert.equal(shouldHideEmptyGroup(0, false), true)
+  // 「不知道」一律不藏（与 aliveSessionCount 的 null 三态纪律一致）。
+  assert.equal(shouldHideEmptyGroup(null, false), false)
+  assert.equal(shouldHideEmptyGroup(null, true), false)
+  // 仍有可见会话时，无论当前会话在哪都不藏。
+  assert.equal(shouldHideEmptyGroup(2, false), false)
+  assert.equal(shouldHideEmptyGroup(2, true), false)
+  // 非布尔的上游字段按「不在本组」处理，不误伤原有的空组收起。
+  assert.equal(shouldHideEmptyGroup(0, undefined), true)
 })
 
 // ---- foldOrphanSubagents：父会话不在列表的子代理（issue #18 第 1 条）--------

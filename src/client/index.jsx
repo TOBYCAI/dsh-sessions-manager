@@ -11,7 +11,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { aliveSessionCount, applyTagFilter, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dotStateFor, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, starredOf, tagDeleteConfirm, titleBackfillDecision, toastDurationFor, workspaceForNodes } from './logic.js'
+import { aliveSessionCount, applyTagFilter, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dotStateFor, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, shouldHideEmptyGroup, starredOf, tagDeleteConfirm, titleBackfillDecision, toastDurationFor, workspaceForNodes } from './logic.js'
 
 export const inject = ['slots']
 
@@ -3439,7 +3439,13 @@ function installSidebarStatusDots() {
         // 拿不到 group.sessions / 数组为空 = 不知道 → 按非空处理，保持显示。
         const group = sidebarAdapter.recognizeGroupQuiet(row)
         const sessions = group && Array.isArray(group.sessions) ? group.sessions : null
-        setGroupHidden(scope, aliveSessionCount(sessions, hiddenIdSet()) === 0)
+        // 当前会话就在本组时绝不藏（见 shouldHideEmptyGroup）：上游只渲染「当前会话」
+        // 那一条 blank 行，插件又把 blank 行一律隐藏，于是组内可见数为 0；
+        // 若照旧按 aliveSessionCount 判空，会把用户正在用的工作区连标题和「+」一起藏掉。
+        setGroupHidden(scope, shouldHideEmptyGroup(
+          aliveSessionCount(sessions, hiddenIdSet()),
+          group !== null && group.containsCurrent === true,
+        ))
       } catch (e) { /* 单组失败不影响其它组 */ }
     })
   }
