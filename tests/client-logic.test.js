@@ -1,35 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { aliveSessionCount, applyTagFilter, ascBranchTime, authoritativeTitleForFirstPaint, branchTimeKey, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dotStateFor, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, moveNoticeText, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, starredOf, tagDeleteConfirm, titleBackfillDecision, TOAST_MAX_MS, TOAST_MIN_MS, toastDurationFor, workspaceForNodes } from '../src/client/logic.js'
-
-// ---- dotStateFor：状态点语义 ----------------------------------------------
-// 历史回归：DSH 把 running 报成 ongoing（9766476）；done 在当前行上不能亮绿
-// （否则点开闪绿）。这两个 case 锁死。
-test('dot states map DSH data-state onto the plugin scheme', () => {
-  assert.equal(dotStateFor({ dataState: 'running' }), 'running')
-  assert.equal(dotStateFor({ dataState: 'ongoing' }), 'running')
-  assert.equal(dotStateFor({ dataState: 'warning' }), 'feedback')
-  assert.equal(dotStateFor({ dataState: 'error' }), 'error')
-  assert.equal(dotStateFor({ dataState: 'done' }), 'done')
-})
-
-test('done dot is suppressed on the active row (no green flash on open)', () => {
-  assert.equal(dotStateFor({ dataState: 'done', isActive: true }), null)
-  assert.equal(dotStateFor({ dataState: 'done', isActive: false }), 'done')
-})
-
-test('manual unread wins over every DSH state', () => {
-  assert.equal(dotStateFor({ manualUnread: true, dataState: 'running' }), 'manual')
-  assert.equal(dotStateFor({ manualUnread: true, dataState: 'error' }), 'manual')
-  assert.equal(dotStateFor({ manualUnread: true, dataState: 'done', isActive: true }), 'manual')
-})
-
-test('unknown or missing states yield no dot', () => {
-  assert.equal(dotStateFor({}), null)
-  assert.equal(dotStateFor({ dataState: '' }), null)
-  assert.equal(dotStateFor({ dataState: 'idle' }), null)
-  assert.equal(dotStateFor({ dataState: 'paused' }), null)
-})
+import { aliveSessionCount, applyTagFilter, ascBranchTime, authoritativeTitleForFirstPaint, branchTimeKey, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, moveNoticeText, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, starredOf, tagDeleteConfirm, titleBackfillDecision, TOAST_MAX_MS, TOAST_MIN_MS, toastDurationFor, workspaceForNodes } from '../src/client/logic.js'
 
 test('authoritative title only corrects the first cold paint', () => {
   assert.equal(authoritativeTitleForFirstPaint({ firstPaint: true, rendered: '旧 header', authoritative: '最新标题' }), '最新标题')

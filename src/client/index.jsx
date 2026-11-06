@@ -11,7 +11,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { aliveSessionCount, applyTagFilter, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dotStateFor, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, starredOf, tagDeleteConfirm, titleBackfillDecision, toastDurationFor, workspaceForNodes } from './logic.js'
+import { aliveSessionCount, applyTagFilter, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, starredOf, tagDeleteConfirm, titleBackfillDecision, toastDurationFor, workspaceForNodes } from './logic.js'
 
 export const inject = ['slots']
 
@@ -2635,9 +2635,7 @@ const SIDEBAR_AUG_CSS = `
 .dsm-sub-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsm-sub-cur{font-size:11px;color:var(--dsw-alias-state-business-primary);flex:none;margin-left:8px}
 .dsm-dot{position:absolute;left:6px;top:50%;transform:translateY(-50%);width:8px;height:8px;border-radius:50%;box-sizing:border-box;cursor:pointer;pointer-events:auto;z-index:1}
-.dsm-dot-unread-manual{background:var(--dsw-alias-state-business-primary)}
-.dsm-dot-waiting{background:var(--dsw-alias-state-warn-primary,#F59E0B)}
-.dsm-dot-unread{background:var(--dsw-alias-state-success-primary)}
+.dsm-dot-manual{background:var(--dsw-alias-state-business-primary)}
 .dsm-drag-source{opacity:.48}
 .dsm-drop-target{position:relative;background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 10%,transparent)!important;outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px;border-radius:8px}
 .dsm-drop-target::after{content:'移动到这里';position:absolute;right:8px;top:50%;transform:translateY(-50%);padding:1px 6px;border-radius:4px;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-inverted);font-size:10px;font-weight:600;line-height:16px;pointer-events:none}
@@ -3236,14 +3234,9 @@ function installSidebarSessionMenuAug() {
   obs.observe(document.body, { childList: true, subtree: false })
 }
 
-// Left-side per-session status dot (DOM shim). The color is driven by DSH's
-// REAL session status, read from the row's own StateDot ([data-state]):
-//   手动标记未读（蓝） = 用户在 ⋯ 菜单或点击圆点手动标记，localStorage 持久化（最高优先级）
-//   工作中（黄）       = DSH state 'ongoing'（旧版兼容 'running'）
-//   需用户反馈（琥珀） = DSH state 'warning'（有追问需用户反馈）
-//   完成后未读（绿）   = DSH state 'done' 且用户尚未读过（read 集合）
-//   完成已读（不显示） = DSH state 'done' 且已读过（read 集合持久化）
-// 手动未读集合 + read 集合均持久化于 localStorage；打开过即记入 read，绿点不再出现。
+// Left-side per-session status dot (DOM shim).
+// DSH 的 StateDot 原样保留（缓冲圈 / 琥珀 / 绿 / 红都按官方口径），插件只补它
+// 没有的那条语义：手动标记未读（蓝，localStorage 持久化，占同一个状态槽）。
 // 另外：进入回收站的会话会整行隐藏（不出现在「未分组」里）。
 function installSidebarStatusDots() {
   if (typeof document === 'undefined') return
@@ -3279,20 +3272,6 @@ function installSidebarStatusDots() {
   const activeRowId = () => {
     const sel = document.querySelector('[role="treeitem"][aria-selected="true"]')
     return sel ? rowId(sel) : null
-  }
-  // Dot colors per the user's scheme. We read DSH's REAL session status from the
-  // row's own StateDot (its [data-state] attr) and recolor it:
-  //   ongoing/running → 黄  工作中
-  //   warning  → 琥珀 有追问需用户反馈
-  //   done     → 绿  完成后未读（读过则不再显示）
-  //   error    → 红  出错/需关注（与 DSH 自带 StateDot 一致）
-  //   (manual  → 蓝  手动标记未读，最高优先级)
-  const COLOR = {
-    manual: 'var(--dsw-alias-state-business-primary)',        // 蓝 手动标记未读
-    running: '#EAB308',                                       // 黄 工作中 (DSH running)
-    feedback: 'var(--dsw-alias-state-warn-primary, #F59E0B)', // 琥珀 需用户反馈 (DSH warning)
-    done: 'var(--dsw-alias-state-success-primary)',           // 绿 完成后未读 (DSH done)
-    error: 'var(--dsw-alias-state-error-primary)',            // 红 出错/需关注 (DSH error)
   }
   const manualUnread = dsmLoadManual()
   // v3.6.2 #2：原 WeakSet「首绘一次即终身免改」升级为 WeakMap 所有权记录
@@ -3842,29 +3821,33 @@ function installSidebarStatusDots() {
           }
         }
       }
-      // Read DSH's REAL session status from the row's own StateDot and recolor
-      // it with the user's scheme (we also hide DSH's dot so only ours shows).
+      // DSH 的状态点原样交回；只有手动标记未读时，插件用蓝点占住同一个状态槽。
       const sd = row.querySelector('[data-state]')
-      if (sd) sd.style.display = 'none'
-      let dot = row.querySelector('[' + DOT + ']')
-      const state = dotStateFor({ manualUnread: manualUnread.has(id), dataState: sd ? sd.getAttribute('data-state') : '', isActive: activeId === id })
-      const color = state ? COLOR[state] : null
-      if (!color) { if (dot) dot.remove(); return }
-      if (!dot) {
-        dot = document.createElement('span')
-        dot.setAttribute(DOT, '')
-        dot.className = 'dsm-dot'
-        if (!row.hasAttribute('data-dsm-pos')) {
-          if (getComputedStyle(row).position === 'static') row.style.position = 'relative'
-          row.setAttribute('data-dsm-pos', '')
+      const own = row.querySelector('[' + DOT + ']')
+      if (manualUnread.has(id)) {
+        if (sd && sd.style.display !== 'none') sd.style.display = 'none'
+        if (!own) {
+          const dot = document.createElement('span')
+          dot.setAttribute(DOT, '')
+          dot.className = 'dsm-dot dsm-dot-manual'
+          dot.title = '已手动标记未读（点击取消）'
+          dot.setAttribute('aria-label', dot.title)
+          if (!row.hasAttribute('data-dsm-pos')) {
+            if (getComputedStyle(row).position === 'static') row.style.position = 'relative'
+            row.setAttribute('data-dsm-pos', '')
+          }
+          dot.addEventListener('click', (e) => {
+            e.stopPropagation(); e.preventDefault()
+            dsmToggleManual(id)
+          })
+          row.insertBefore(dot, row.firstChild)
         }
-        dot.addEventListener('click', (e) => {
-          e.stopPropagation(); e.preventDefault()
-          dsmToggleManual(id)
-        })
-        row.insertBefore(dot, row.firstChild)
+      } else {
+        if (own) own.remove()
+        // 只在确实被我们藏过时才恢复：每帧重写 style 会命中 MutationObserver 自己的
+        // attributeFilter('style')，导致每帧重绘一次。
+        if (sd && sd.style.display === 'none') sd.style.display = ''
       }
-      dot.style.background = color
     })
     dsmSyncEmptyGroups(purgedNow)
     // issue #16：等隐藏标记落定后再校准展开计数（数据层优先，DOM 标记兜底）。

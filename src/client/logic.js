@@ -1,27 +1,8 @@
 // dsh-sessions-manager — client 纯判定逻辑。
 //
-// 侧栏增强里最容易随 DSH 上游变化出回归的三块判定抽到这里：
-// 状态点语义、拖拽可放置校验、fiber node → 会话/工作区识别。
+// 侧栏增强里最容易随 DSH 上游变化出回归的两块判定抽到这里：
+// 拖拽可放置校验、fiber node → 会话/工作区识别。
 // 本模块不碰 DOM，node --test 直接可测（tests/client-logic.test.js）。
-
-// 状态点语义：manual 未读最高优先；done 在当前查看的行上不亮绿
-// （读过即视为已读）。返回逻辑态名，颜色映射留在 UI 层。
-// 历史回归：DSH 曾把 running 报为 ongoing（9766476），上游枚举变化要盯这里。
-// issue #4：上游还存在 waiting / needs-attention 等同义词，这里收敛到同一
-// 逻辑态，颜色映射仍由 UI 层统一处理（issue 保持 open 直到上游确认）。
-export function dotStateFor({ manualUnread = false, dataState = '', isActive = false } = {}) {
-  if (manualUnread) return 'manual'
-  switch (dataState) {
-    case 'ongoing':
-    case 'running': return 'running'
-    case 'warning':
-    case 'waiting':
-    case 'needs-attention': return 'feedback'
-    case 'error': return 'error'
-    case 'done': return isActive ? null : 'done'
-    default: return null
-  }
-}
 
 // 权威标题只修正新出现 DOM 行的冷态标题。行一旦完成首次 paint，后续文本
 // 变化属于 DSH Core 的实时更新（例如重命名），插件不得再用轮询快照覆盖。
