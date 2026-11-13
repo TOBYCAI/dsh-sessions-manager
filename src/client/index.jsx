@@ -428,20 +428,47 @@ async function postActiveAware(path, body) {
   return postJSON(path, body)
 }
 
-// Left-nav icon swap: DSH's settings shell renders a shared fallback gear for
-// every custom section and settings.section has no per-section icon field.
-// Like dsh-better-sidebar, we mark our own row by matching its visible label
-// text, then CSS swaps the gear for an archive-box glyph. The marker owns no
-// shell structure and is removed on fiber disposal (HMR-safe, ships with the
-// plugin).
+// 设置左导航图标。
+//
+// 0.2.2 起外壳声明了 `settings.section.icon` 槽，我们把自己的归档盒图标注册在
+// 那里（见下方 `ArchiveBoxIcon` 与 apply 里的注册），外壳就**根本没有** fallback
+// 齿轮可渲染——一个图标，不是两个。
+//
+// 下面这段 CSS 只服务 0.2.2 之前的外壳：那时没有逐 section 的图标字段，只能把
+// 我们的行按可见文案标记出来，再用遮罩盖掉原生齿轮。这里有两个必须注意的点：
+//   1. 原生图标**不是** button 的直接子节点，0.2.2 把它包进了
+//      `<span class="navIcon">`，所以老写法 `> svg:first-child` 一个都匹配不到，
+//      齿轮留了下来、与我们的遮罩并排显示（就是「设置里有两个 logo」）。
+//      改为匹配任意后代 `svg`，并排除掉我们自己那颗（带 `data-dsm-nav-icon`）。
+//   2. 遮罩用 `:not(:has(...))` 兜住：只有确认没有挂上我们的图标时才画，
+//      两套方案永远不会同时出现。
 const NAV_CSS = `
-[data-dsh-nav-sessions] > svg:first-child { display: none; }
-[data-dsh-nav-sessions]::before {
+[data-dsh-nav-sessions] svg:not([data-dsm-nav-icon]) { display: none; }
+[data-dsh-nav-sessions]:not(:has([data-dsm-nav-icon]))::before {
   content: ''; flex: none; width: 16px; height: 16px; background: currentColor;
   -webkit-mask: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http://www.w3.org/2000/svg'%20width%3D'24'%20height%3D'24'%20viewBox%3D'0%200%2024%2024'%20fill%3D'none'%20stroke%3D'black'%20stroke-width%3D'2'%20stroke-linecap%3D'round'%20stroke-linejoin%3D'round'%3E%3Cpath%20d%3D'M21%208v13H3V8'/%3E%3Cpath%20d%3D'M1%203h22v5H1z'/%3E%3Cpath%20d%3D'M10%2012h4'/%3E%3C/svg%3E") center / contain no-repeat;
   mask: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http://www.w3.org/2000/svg'%20width%3D'24'%20height%3D'24'%20viewBox%3D'0%200%2024%2024'%20fill%3D'none'%20stroke%3D'black'%20stroke-width%3D'2'%20stroke-linecap%3D'round'%20stroke-linejoin%3D'round'%3E%3Cpath%20d%3D'M21%208v13H3V8'/%3E%3Cpath%20d%3D'M1%203h22v5H1z'/%3E%3Cpath%20d%3D'M10%2012h4'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 `
+
+// 设置左导航里属于本插件的图标（归档盒）。与上面遮罩用的是同一套路径数据，
+// 所以旧版（遮罩）与新壳（真 SVG）看到的是同一个形状。
+//
+// 槽签名为 `{ size, active }`，`size` 以像素为单位；这里刻意不因 `active` 改变
+// 形状或粗细——外壳自己负责选中态的背景，图标保持同一套视觉。
+function ArchiveBoxIcon({ size = 16 }) {
+  return (
+    <svg
+      width={size} height={size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      data-dsm-nav-icon="" aria-hidden="true" focusable="false"
+    >
+      <path d="M21 8v13H3V8" />
+      <path d="M1 3h22v5H1z" />
+      <path d="M10 12h4" />
+    </svg>
+  )
+}
 
 function markSettingsNav() {
   const LABEL = '会话管理'
@@ -4605,6 +4632,17 @@ export function apply(ctx) {
   const disposeDragAutoScroll = installSidebarDragAutoScroll()
   if (disposeDragAutoScroll) ctx.effect(() => disposeDragAutoScroll)
   const workspacesSvc = ctx.get('workspaces')
+  // 设置左导航图标：id 必须与下面 `settings.section` 的贡献一致，外壳按 id 配对
+  // （`renderSlot('settings.section.icon', ..., { only: row.id, fallback: navIcon(id) })`）。
+  // 配对成功后 fallback 的齿轮不再渲染，行里只剩我们这一颗。
+  // 0.2.2 之前没有声明该槽：`slots.inject` 会一直等声明、不执行回调，旧壳自动
+  // 落回 NAV_CSS 的遮罩路径，不需要额外分支。
+  ctx.slots.inject('settings.section.icon', () =>
+    ctx.slots.register(
+      { name: 'settings.section.icon', id: 'session-manager' },
+      (props) => <ArchiveBoxIcon {...props} />,
+    ),
+  )
   ctx.slots.inject('settings.section', () =>
     ctx.slots.register(
       { name: 'settings.section', id: 'session-manager', order: 90, label: '会话管理' },

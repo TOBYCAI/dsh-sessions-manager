@@ -1,7 +1,7 @@
 {
   "name": "dsh-sessions-manager",
   "description": "DSH 会话管理插件：设置面板 + 侧栏双入口，归档 / 恢复 / 跨工作区移动 / 回收站（可恢复、批量清空、自动清理），子代理折叠与血缘、删父会话连带子代理，空白会话识别，按标题 · ID · 工作区搜索，带磁盘占用与会话详情。已适配 DSH 0.1.7 / 0.2.0 / 0.2.1 / 0.2.2-rc.1。Session manager for DeepSeek Harness — archive / restore / move / trash lifecycle from both the settings panel and the sidebar, with subagent lineage, blank detection and per-session stats (0.1.7 / 0.2.0 / 0.2.1 / 0.2.2-rc.1 ready).",
-  "version": "3.7.11",
+  "version": "3.7.12",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
