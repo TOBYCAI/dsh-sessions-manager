@@ -689,7 +689,10 @@ export function apply(ctx) {
       persistenceEntry = found
       header = found ? found.header : null
       if (header) {
-        const loc = persistence.locate(header)
+        // 用校验版定位：官方 locate() 按 header.version 拼名，老会话磁盘上仍是
+        // legacy 命名，采信它会把这个不存在路径永久写进回收站条目，日后
+        // restore / purge 全部对着空气操作（issue #26 现象 2 的源头）。
+        const loc = await persistence.locateVerified(header).catch(() => null)
         if (loc && typeof loc.path === 'string') removedPath = loc.path
         cwd = header.cwd || null
         title = header.title || (header.meta && header.meta.title) || null
@@ -719,6 +722,18 @@ export function apply(ctx) {
       throw error
     }
     const archived = await mutateArchived((list) => ({ next: null, value: list.includes(sid) })).catch(() => false)
+    // 删除时同步原生归档（issue #27）。
+    //
+    // 回收站会话的日志留在原工作区，DSH 的原生账本（sessionCount / 水位线 /
+    // 「展开其余 N 个会话」按钮）仍然把它算作可见。插件只能渲染后藏 DOM，而按钮
+    // 每次被 React 重建都会带着原生旧计数闪回来，形成 HIDDEN/VISIBLE 振荡。
+    // 让原生账本本身收敛才是稳定的解法：删除即归档，原生列表不再计入。
+    //
+    // `wasArchived` 仍然记录「删除前」的真实状态，恢复时按它对称处理
+    // （见 restoreFromTrash 的 `entry.wasArchived === false` 分支）。
+    if (!archived) {
+      try { await archiveOne(sid) } catch (e) { /* 原生归档失败不阻塞删除：DOM shim 仍兜底 */ }
+    }
     await mutateTrash((store) => {
       const entry = {
         // v3.6.2 #7：不再把 cwd/裸 id 冒充标题永久定格——存 null，预热解出后
@@ -848,14 +863,27 @@ export function apply(ctx) {
     const store = await readTrashStore()
     const entry = store.items.find((t) => String(t.sessionId) === sid)
     let originalPath = entry && typeof entry.originalPath === 'string' ? entry.originalPath : null
+    let repairedPath = null
     if (!originalPath && header) {
       // handle 时代官方收走了 locate，用守卫式推导（root → 目录结构 → id 归属）
       // 代替：推导成功且文件在盘 = 真核验通过，而不是标注 unverified 放行。
       const loc = await persistence.locateVerified(header).catch(() => null)
-      if (loc && typeof loc.path === 'string') originalPath = loc.path
+      if (loc && typeof loc.path === 'string') { originalPath = loc.path; repairedPath = loc.path }
     }
     if (originalPath) {
-      const existsOnDisk = await stat(originalPath).then(() => true).catch(() => false)
+      let existsOnDisk = await stat(originalPath).then(() => true).catch(() => false)
+      if (!existsOnDisk && header) {
+        // 存量条目纠偏（issue #22 现象 B / #26 现象 2）：索引里记的可能是
+        // 「按 header.version 拼出来的名字」，而磁盘上还停在老代命名。3.7.10
+        // 会直接报 DSM_SESSION_LOG_MISSING，把「文件明明在」说成「已消失」。
+        // 这里按当前磁盘布局重新推导一次；推导结果本身已通过 stat 校验。
+        const loc = await persistence.locateVerified(header).catch(() => null)
+        if (loc && typeof loc.path === 'string' && loc.path !== originalPath) {
+          originalPath = loc.path
+          repairedPath = loc.path
+          existsOnDisk = true
+        }
+      }
       if (!existsOnDisk) {
         return { ok: false, status: 409, code: 'DSM_SESSION_LOG_MISSING', message: '回收站索引仍记录该会话，但其日志文件已消失（可能被外部移动或删除）' }
       }
@@ -866,7 +894,7 @@ export function apply(ctx) {
     if (cwd) {
       try { workspaceGone = !w.list().some((ent) => ent.path === cwd) } catch (e) { workspaceGone = false }
     }
-    return { ok: true, workspaceGone, verified }
+    return { ok: true, workspaceGone, verified, repairedPath }
   }
 
   // Restore a trashed session: the log never left its original workspace dir,
@@ -947,10 +975,17 @@ export function apply(ctx) {
           }
         } catch (e) {}
       }
-      if (!target && typeof entry.originalPath === 'string') target = entry.originalPath
+      if (!target && typeof entry.originalPath === 'string') {
+        // 兜底路径必须先验存在：originalPath 可能是老代命名拼出来的假路径，
+        // 采信它会让下面的 unlink 对着空气操作（ENOENT 被当成功后仍写 tombstone，
+        // 条目从此不可回退 —— issue #26 现象 2）。
+        const ok = await stat(entry.originalPath).then(() => true).catch(() => false)
+        if (ok) target = entry.originalPath
+      }
       if (!target) {
-        const error = new Error('无法确认该会话的物理日志位置，已停止永久删除')
+        const error = new Error('无法确认该会话的物理日志位置（日志可能已被外部移动或删除），已停止永久删除')
         error.status = 409
+        error.code = 'DSM_SESSION_LOG_MISSING'
         throw error
       }
       // JSONL persistence stores logs as
@@ -998,6 +1033,40 @@ export function apply(ctx) {
         await purgeSessionArtifacts(sp, sid, locatedHeader)
       } else if (target) {
         try { await unlink(target) } catch (e) { if (e && e.code !== 'ENOENT') throw new Error('删除文件失败：' + String((e && e.message) || e)) }
+        // legacy 布局：同一会话目录里可能并存多代日志（session.jsonl.zstd 与
+        // session.v3.jsonl.zstd，见 issue #22 的实测）。只删最高代会让 DSH 回退
+        // 读到旧代，等于没删。这里把同目录其它代际一并清掉。
+        try {
+          const dir = dirname(target)
+          for (const name of await readdir(dir)) {
+            if (name === basename(target)) continue
+            if (!/^session(\.v\d+)?\.jsonl(\.zstd|\.zst)?$/.test(name)) continue
+            try { await unlink(join(dir, name)) } catch (e) { /* 单个旧代失败由下面的复核兜住 */ }
+          }
+        } catch (e) { /* 目录不可读：交给下面的复核 */ }
+      }
+      // 删除后复核：unlink 返回不代表文件真的没了（路径被并发改写、后端走了
+      // 另一份副本、或 purgeSessionArtifacts 只删了部分产物）。3.7.10 在这里
+      // 直接报成功并移除条目，用户看到的是「已彻底删除」而文件仍在原处，
+      // 之后 restore 只能得到 410 —— 条目和文件都回不去了（issue #26）。
+      {
+        let stillThere = await stat(target).then(() => true).catch(() => false)
+        if (!stillThere) {
+          // 目录里若还剩别的代际日志，DSH 仍能读到这本会话。
+          try {
+            const names = await readdir(dirname(target))
+            stillThere = names.some((n) => /^session(\.v\d+)?\.jsonl(\.zstd|\.zst)?$/.test(n))
+          } catch (e) { /* 目录已不在 = 干净 */ }
+        }
+        if (stillThere) {
+          // 回滚 tombstone：条目要留在回收站里可重试，且不能被判成「已彻底删除」。
+          store.purgedSessionIds = store.purgedSessionIds.filter((id) => String(id) !== sid)
+          try { await writeTrashStore(store) } catch (e) { /* 回滚失败时条目仍在，下次重试 */ }
+          const error = new Error('日志文件仍在磁盘上，彻底删除未完成；回收站条目已保留，可重试')
+          error.status = 409
+          error.code = 'DSM_PURGE_INCOMPLETE'
+          throw error
+        }
       }
       try { for (const ent of w.list()) { if (ent.sessionIds.includes(sid)) { try { await ent.detachSession(sid) } catch (e) {} } } } catch (e) {}
       try { if (w.sessionPaths && w.sessionPaths.delete) w.sessionPaths.delete(sid) } catch (e) {}
@@ -2070,10 +2139,21 @@ export function apply(ctx) {
       }
     }))
 
+    // 客户端会随能力探测上报它实际启用的「会话 ⋯ 菜单」通道。回显在这里，
+    // 排障时不必打开 devtools 就能判断「菜单三项没出来」到底是因为走了旧 DOM
+    // 路径、还是注册压根没发生（issue #28 的定位成本就花在这上面）。
+    let clientMenuProbe = null
     disposers.push(ctx.webServer.register({
       kind: 'exact',
       path: '/archived-sessions/capabilities',
-      handler: async (req, res) => json(res, { ...capabilities, buildStamp: BUILD_STAMP }),
+      handler: async (req, res) => {
+        try {
+          const body = await readJsonBody(req)
+          const mode = body && typeof body.menuMode === 'string' ? body.menuMode : null
+          if (mode) clientMenuProbe = { mode, at: Date.now() }
+        } catch (e) { /* 老客户端不带 body：保留上一次记录 */ }
+        json(res, { ...capabilities, buildStamp: BUILD_STAMP, clientMenu: clientMenuProbe })
+      },
     }))
 
     // 活跃会话心跳（客户端 → host）。0.1.7+ 起 host 无从得知 UI 当前选中了哪个

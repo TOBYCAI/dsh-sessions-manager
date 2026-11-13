@@ -13,9 +13,21 @@
 //     is an opaque change token valid ONLY within one service instance and one
 //     session id (see src/session-meta-cache.js).
 
+import { stat } from 'node:fs/promises'
 import { locateSessionArtifacts } from '../handle-era-paths.js'
 
 const DEFAULT_CHUNK = 400
+
+// 落盘存在性判定：任何异常（ENOENT / EACCES / 路径非法）都视为「不在」。
+async function existsOnDisk(path) {
+  if (typeof path !== 'string' || !path) return false
+  try {
+    const st = await stat(path)
+    return st.isFile()
+  } catch (e) {
+    return false
+  }
+}
 // 防御上限：一次 inspect 的分块循环绝不能无限自旋（后端 read 行为异常时快速失败）。
 const MAX_CHUNKS = 20000
 
@@ -192,11 +204,19 @@ export function createPersistenceAdapter(service) {
   // 落盘校验版定位：legacy 走官方 locate；handle 时代官方收走了 locate，改由
   // handle-era-paths 的三层守卫推导（root 实例字段 → 目录结构 → id 归属），
   // 任一层失败返回 null，调用方安全降级。返回 { path, sessionDir|null }。
+  //
+  // 关键：官方 `locate()` 只按 `header.version` 拼文件名，从不看盘。老会话的
+  // header 早已升到 v4，磁盘上却还是 legacy 的 `session.jsonl.zstd`（8/28–9/7
+  // 那批）——直接采信会得到一个不存在的路径，下游（恢复/彻底删除）于是把
+  // 「文件明明在」当成「已消失」（issue #22 现象 B、#26 现象 2）。所以这里
+  // **先 stat 校验再采信**，校验不过就落到目录扫描按最高代际纠偏。
   async function locateVerified(header) {
     if (typeof service.locate === 'function') {
       try {
         const loc = service.locate(header)
-        if (loc && typeof loc.path === 'string') return { path: loc.path, sessionDir: null }
+        if (loc && typeof loc.path === 'string' && await existsOnDisk(loc.path)) {
+          return { path: loc.path, sessionDir: null }
+        }
       } catch (e) { /* 落到推导 */ }
     }
     const artifacts = await locateSessionArtifacts(service, header)

@@ -46,18 +46,15 @@ A persistent DSH plugin (host + browser halves) covering both the **settings pan
 
 ### Main sidebar: status dots
 
-A small dot is rendered to the left of each session row. Its color is driven by DSH's native `StateDot` state:
+The status dot is handed back to DSH's native `StateDot`: running (buffering ring), awaiting input (amber), completed-unread (green) and error (red) are all rendered by DSH itself. The plugin no longer repaints them or hides the native dot, so the shape/animation layer of information is preserved.
 
-| Color | State | Description |
+The plugin only adds the one semantic DSH doesn't have:
+
+| Dot | State | Description |
 |---|---|---|
 | 🔵 Blue | Manually marked unread | Toggle via the ⋯ menu or by clicking the dot; auto-cleared when the session is opened |
-| 🟡 Yellow | Working | The session is currently running (`ongoing`, with legacy `running` compatibility) |
-| 🟠 Amber | Awaiting feedback | The session has a follow-up question and is waiting for your input or confirmation (`warning`) |
-| 🟢 Green | Completed but unread | The session is done (`done`) but you haven't reopened it yet; disappears after you view it |
-| 🔴 Red | Error / needs attention | The session hit an error (`error`) |
-| No dot | Completed and read / idle | — |
 
-The plugin hides DSH's own status dot and re-renders it using the palette above, so the two dots never overlap.
+While the manual-unread mark is set, the blue dot occupies the same status slot (the native dot steps aside); it returns as soon as the mark is cleared.
 
 ### Recycle bin
 
@@ -225,6 +222,10 @@ lib/client.js      pre-built client (ModuleLoader CJS handshake)
   - The sidebar wraps session and workspace rows in an extra `span`: the workspace title row and the group container are located by preferring direct children and only looking further down without crossing nested subgroups — otherwise the whole calibration silently short-circuits.
   - The collapsed-group member count is calibrated from `sessionCount`, which does not depend on expansion (upstream renamed `collapsedSessionRows` to `watermarkRows`; `group.sessions` is empty while collapsed and `sessionVisible()`-filtered while expanded). Missing either input keeps the upstream wording instead of guessing a number.
   - Empty-group title collapse: the container is still a role-less `groupSection` (`role="group"` has only ever marked subgroups since 0.1.7), so the anchor moved to the workspace title row's parent.
+- `0.2.2-rc.1` (verified, issue #28):
+  - The session `⋯` menu became **data-registered + portal-rendered**: the popup is an independent React tree mounted on `body`, so walking up the fiber chain no longer reaches the session row. The plugin now registers through the official `ctx.contextMenus.register({ target: 'session' })` — the session id is supplied by the host and the items are rendered by the host, with no dependency on DOM shape; on `0.1.7`–`0.2.1`, where the service is absent, it falls back to the original DOM injection.
+  - Deleting a session now also writes DSH's native archive flag, so the native `sessionCount` / watermark / "show N more sessions" ledger converges and the button no longer oscillates between "hidden by the plugin" and "native count comes back" (issue #27). Restoring puts the pre-delete archive state back symmetrically.
+  - `dsh.client.inject` no longer lists the 0.1.x-era `dsh-client-runtime` / `dsh-client-ui-slots`, which do not exist in current hosts; only packages the host really provides are kept (issue #23).
 - Unverified future runtimes expose only capabilities the plugin can safely identify; method presence alone is not presented as behavioral compatibility.
 
 ### Behavior differences and degradations on the SessionHandle era (`0.1.3+`)

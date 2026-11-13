@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createPersistenceAdapter, normalizePersistenceList } from '../src/compat/persistence.js'
+import { deriveSessionDir } from '../src/handle-era-paths.js'
 
 test('normalizes legacy headers and handle-era snapshots', () => {
   const legacy = { id: 'old', cwd: '/old' }
@@ -246,4 +250,65 @@ test('an unknown read shape fails loudly instead of looking empty', async () => 
     },
   })
   await assert.rejects(adapter.readSession('s1', 0), (e) => e.code === 'DSM_READ_SHAPE_UNKNOWN')
+})
+
+// ---- locateVerified：官方 locate 不可信时必须落到磁盘纠偏 --------------------
+// issue #22 现象 B / #26 现象 2 的真实现场：header.version 早已升到 4，磁盘上却
+// 还是 8/28–9/7 那批 legacy 命名（session.jsonl.zstd）。官方 locate() 只按
+// header.version 拼名字、从不看盘，采信它会让恢复报「日志已消失」，让彻底删除
+// 对着空气 unlink 之后还写墓碑（假成功且条目不可回退）。
+test('locateVerified refuses a stale official path and falls back to the on-disk generation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsm-locate-'))
+  try {
+    const id = 'legacy-session'
+    const cwd = '/tmp/ws-legacy'
+    const dir = deriveSessionDir(root, cwd, id)
+    await mkdir(dir, { recursive: true })
+    const legacyLog = join(dir, 'session.jsonl.zstd')
+    await writeFile(legacyLog, 'zstd-bytes')
+
+    const header = { id, cwd, version: 4 }
+    const service = {
+      root,
+      // 官方 locate：拼出 v4 名字，但那个文件从未落过盘
+      locate: () => ({ path: join(dir, 'session.v4.jsonl.zstd') }),
+      async list() { return [{ header }] },
+    }
+    const located = await createPersistenceAdapter(service).locateVerified(header)
+    assert.ok(located, 'must resolve the real generation instead of trusting a missing path')
+    assert.equal(located.path, legacyLog)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('locateVerified prefers the official path when it really exists', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsm-locate-hit-'))
+  try {
+    const id = 'fresh-session'
+    const cwd = '/tmp/ws-fresh'
+    const dir = deriveSessionDir(root, cwd, id)
+    await mkdir(dir, { recursive: true })
+    const v4Log = join(dir, 'session.v4.jsonl.zstd')
+    await writeFile(v4Log, 'zstd-bytes')
+
+    const header = { id, cwd, version: 4 }
+    const service = { root, locate: () => ({ path: v4Log }), async list() { return [{ header }] } }
+    const located = await createPersistenceAdapter(service).locateVerified(header)
+    assert.equal(located && located.path, v4Log)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('locateVerified reports nothing when neither the official path nor the directory exists', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsm-locate-miss-'))
+  try {
+    const header = { id: 'ghost', cwd: '/tmp/ws-gone', version: 4 }
+    const service = { root, locate: () => ({ path: join(root, 'nowhere', 'session.v4.jsonl.zstd') }), async list() { return [] } }
+    // 必须返回 null（无法确认），而不是把那个不存在的路径当答案交出去。
+    assert.equal(await createPersistenceAdapter(service).locateVerified(header), null)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })

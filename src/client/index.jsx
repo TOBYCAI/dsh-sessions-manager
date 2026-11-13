@@ -11,7 +11,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { aliveSessionCount, applyTagFilter, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dotStateFor, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, starredOf, tagDeleteConfirm, titleBackfillDecision, toastDurationFor, workspaceForNodes } from './logic.js'
+import { aliveSessionCount, applyTagFilter, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, shouldHideEmptyGroup, starredOf, tagDeleteConfirm, titleBackfillDecision, toastDurationFor, workspaceForNodes } from './logic.js'
 
 export const inject = ['slots']
 
@@ -2635,9 +2635,7 @@ const SIDEBAR_AUG_CSS = `
 .dsm-sub-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsm-sub-cur{font-size:11px;color:var(--dsw-alias-state-business-primary);flex:none;margin-left:8px}
 .dsm-dot{position:absolute;left:6px;top:50%;transform:translateY(-50%);width:8px;height:8px;border-radius:50%;box-sizing:border-box;cursor:pointer;pointer-events:auto;z-index:1}
-.dsm-dot-unread-manual{background:var(--dsw-alias-state-business-primary)}
-.dsm-dot-waiting{background:var(--dsw-alias-state-warn-primary,#F59E0B)}
-.dsm-dot-unread{background:var(--dsw-alias-state-success-primary)}
+.dsm-dot-manual{background:var(--dsw-alias-state-business-primary)}
 .dsm-drag-source{opacity:.48}
 .dsm-drop-target{position:relative;background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 10%,transparent)!important;outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px;border-radius:8px}
 .dsm-drop-target::after{content:'移动到这里';position:absolute;right:8px;top:50%;transform:translateY(-50%);padding:1px 6px;border-radius:4px;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-inverted);font-size:10px;font-weight:600;line-height:16px;pointer-events:none}
@@ -2786,9 +2784,17 @@ function dsmOnNotice(fn) { dsmNoticeHooks.add(fn); return () => dsmNoticeHooks.d
 // 0.1.3 移除：上游本就不把空白会话渲染进侧栏，开关没有可服务的场景）。
 // 只隐藏，永不删除；子代理行按 DSH 设计不进侧栏（ui-subagent README 明文
 // "omitted from the ordinary sidebar"），收纳由上游完成，插件侧不做。
+// 会话 ⋯ 菜单实际启用的通道：'contextMenus'（0.2.2+ 官方数据注册）/
+// 'dom'（旧版 DOM 注入）/ null（尚未判定）。随能力探测一并上报给 host，
+// 用户报「菜单三项不见了」时不必打开 devtools 就能定位走的是哪条路。
+let dsmMenuMode = null
 async function dsmLoadCapabilities() {
-  try { dsmCapabilities = await postJSON('/archived-sessions/capabilities', {}) } catch (e) { /* unknown stays safely unavailable */ }
+  try { dsmCapabilities = await postJSON('/archived-sessions/capabilities', { menuMode: dsmMenuMode || 'pending' }) } catch (e) { /* unknown stays safely unavailable */ }
   return dsmCapabilities
+}
+function dsmReportMenuMode(mode) {
+  dsmMenuMode = mode
+  dsmLoadCapabilities().catch(() => {})
 }
 function dsmActionCapability(name, legacy) {
   const source = dsmCapabilities && dsmCapabilities.actions
@@ -2898,6 +2904,9 @@ function dsmTeardownSidebarAug() {
       btn.removeAttribute('data-dsm-overflow-write')
       btn.removeAttribute('data-dsm-overflow-ver')
     })
+    // issue #27：隐藏规则在样式表里，必须一并撤掉——否则插件停用后
+    // 「展开其余 N 个会话」会被一条孤儿规则永久藏住，那些会话再也点不开。
+    document.querySelectorAll('[data-dsm-overflow-hide]').forEach((el) => el.remove())
   } catch (e) { /* best-effort */ }
   try {
     document.querySelectorAll('[data-dsm-group-hidden]').forEach((owner) => {
@@ -2970,7 +2979,7 @@ const sidebarAdapter = createSidebarAdapter()
 // apply(ctx) 可能被再次调用（HMR / profile 重载）：用模块级守卫保证观察器、
 // 定时器与 document 级监听器只装一份，绝不叠加（叠加会造成重复提示与后台 CPU 增长）。
 let sidebarMenuAugInstalled = false
-function installSidebarSessionMenuAug() {
+function installSidebarSessionMenuAug(ctx) {
   if (typeof document === 'undefined') return
   if (sidebarMenuAugInstalled) return
   sidebarMenuAugInstalled = true
@@ -3145,6 +3154,118 @@ function installSidebarSessionMenuAug() {
         .catch((e) => toast('删除失败：' + String((e && e.message) || e)))
     })
   }
+  // ── 0.2.2+：官方 contextMenus 数据注册 ────────────────────────────────
+  //
+  // DSH 0.2.2 把会话菜单换成「数据注册 + portal 渲染」：弹层挂在 body 下是一棵
+  // 独立 React 树，fiber 祖先链里没有会话行组件，`props.node.id` 永远取不到 ——
+  // 3.7.10 的 DOM 增强因此在 0.2.2 上完全失效（issue #28）。官方同时给了
+  // `ctx.contextMenus.register({ target: 'session' })`：sessionId 由宿主直接
+  // 给出，菜单项也由宿主渲染，不再依赖任何 DOM 形状。
+  const contextMenuSvc = () => {
+    try { return ctx && typeof ctx.get === 'function' ? ctx.get('contextMenus') : null } catch (e) { return null }
+  }
+  // 移动会话的子菜单要工作区清单。每开一次菜单发两个请求太贵，缓存 15s。
+  let menuSnapshot = { at: 0, workspaces: [], sessionPath: new Map() }
+  const loadMenuSnapshot = async () => {
+    if (Date.now() - menuSnapshot.at < 15000) return menuSnapshot
+    const [ws, sess] = await Promise.all([
+      postJSON('/archived-sessions/workspaces', {}),
+      postJSON('/archived-sessions/sessions', {}),
+    ])
+    const sessionPath = new Map()
+    for (const item of (sess && sess.items) || []) {
+      if (item && item.sessionId != null && typeof item.workspacePath === 'string') {
+        sessionPath.set(String(item.sessionId), item.workspacePath)
+      }
+    }
+    menuSnapshot = { at: Date.now(), workspaces: (ws && ws.items) || [], sessionPath }
+    return menuSnapshot
+  }
+  const registerDataMenus = (svc) => {
+    // 官方会话项 order：pin 100 / rename 200 / fork 300 / 复制 ID 450 / 归档 600
+    // （归档带 afterContent，渲染在同级 footer）。标记未读排最前；移动与删除
+    // 同样走 afterContent，按「归档 → 移动 → 删除」的危险度递增顺序排在后面。
+    ctx.effect(() => svc.register({
+      id: 'dsm.mark-unread',
+      target: 'session',
+      order: 50,
+      resolve: ({ sessionId }) => {
+        const id = String(sessionId)
+        const marked = dsmLoadManual().has(id)
+        return [{
+          id: 'toggle',
+          label: marked ? '标记已读' : '标记未读',
+          run: () => { dsmToggleManual(id) },
+        }]
+      },
+    }), 'dsm: mark unread menu')
+    ctx.effect(() => svc.register({
+      id: 'dsm.move-session',
+      target: 'session',
+      order: 700,
+      resolve: async ({ sessionId }) => {
+        const id = String(sessionId)
+        const disabled = (reason) => [{
+          id: 'move',
+          label: '移动会话',
+          afterContent: true,
+          disabled: true,
+          ...(reason ? { failureLabel: reason } : {}),
+        }]
+        const cap = dsmActionCapability('relocateSession') || dsmActionCapability('move')
+        if (!cap || !cap.available) return disabled(cap && cap.reason)
+        let snap = null
+        try { snap = await loadMenuSnapshot() } catch (e) { snap = null }
+        if (!snap || !snap.workspaces.length) return disabled()
+        const curPath = snap.sessionPath.get(id) || null
+        return [{
+          id: 'move',
+          label: '移动会话',
+          afterContent: true,
+          children: snap.workspaces.map((w) => {
+            const name = w.title || pathName(w.path) || w.workspaceId
+            const isCur = !!curPath && w.path === curPath
+            return {
+              id: 'ws:' + String(w.path),
+              label: isCur ? name + '（当前）' : name,
+              disabled: isCur,
+              failureLabel: '移动失败',
+              run: async () => {
+                const r = await postActiveAware('/archived-sessions/move', { sessionId: id, targetPath: w.path })
+                // 会话被 DSH 打开时服务端只登记排队：磁盘与工作区分组都没动，
+                // 绝不能报「已移动」（issue #18 的教训位）。
+                if (r && r.queued) {
+                  toast(r.notes && r.notes.length ? r.notes.join(' ') : '会话正被 DSH 打开，已排队待移动；重启 DSH 后会自动完成（请先别打开它）。')
+                  return
+                }
+                toast(r && r.already ? `已在「${name}」` : `已移到「${name}」`)
+              },
+            }
+          }),
+        }]
+      },
+    }), 'dsm: move session menu')
+    ctx.effect(() => svc.register({
+      id: 'dsm.delete-session',
+      target: 'session',
+      order: 800,
+      resolve: ({ sessionId }) => [{
+        id: 'delete',
+        label: '删除会话',
+        afterContent: true,
+        danger: true,
+        run: () => { openDeleteConfirm(String(sessionId)) },
+      }],
+    }), 'dsm: delete session menu')
+  }
+  const activateDataMenus = () => {
+    const svc = contextMenuSvc()
+    if (!svc || typeof svc.register !== 'function' || typeof ctx.effect !== 'function') return false
+    try { registerDataMenus(svc) } catch (e) { return false }
+    dsmReportMenuMode('contextMenus')
+    return true
+  }
+
   const augmentMenu = (menuEl, info) => {
     if (menuEl.querySelector('[' + AUG + ']')) return
     const viewport = menuEl.querySelector('[role="presentation"]') || menuEl.firstElementChild
@@ -3160,6 +3281,9 @@ function installSidebarSessionMenuAug() {
     const mk = (label, svg, danger) => {
       const wrap = protoWrap ? protoWrap.cloneNode(false) : document.createElement('div')
       if (protoWrapCls) wrap.className = protoWrapCls
+      // 供 dispose 时整段摘除（0.2.2 上若后来发现 contextMenus 可用，DOM 注入
+      // 需要能干净退出，不能留下第二套菜单项）。
+      wrap.setAttribute(AUG + '-wrap', '')
       const btn = document.createElement('button')
       btn.type = 'button'
       btn.setAttribute('role', 'menuitem')
@@ -3221,6 +3345,11 @@ function installSidebarSessionMenuAug() {
     window.dispatchEvent(new Event('resize'))
   }
 
+  // 0.2.2+ 优先走官方数据注册。拿不到服务时按旧版 DOM 注入，并在服务稍后
+  // 出现时切过去 —— 插件 apply 可能早于 contextMenus 注册完成。
+  if (activateDataMenus()) return
+  dsmReportMenuMode('dom')
+
   const seen = new WeakSet()
   const obs = new MutationObserver(() => {
     if (sidebarAdapter.disabled) return
@@ -3234,16 +3363,31 @@ function installSidebarSessionMenuAug() {
     })
   })
   obs.observe(document.body, { childList: true, subtree: false })
+  let switchTimer = null
+  const disposeDomAug = () => {
+    sidebarMenuAugInstalled = false
+    try { obs.disconnect() } catch (e) {}
+    if (switchTimer) { clearInterval(switchTimer); switchTimer = null }
+    if (activeSubClose) { try { activeSubClose() } catch (e) {} activeSubClose = null }
+    if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null }
+    try { document.querySelectorAll('[' + AUG + '-wrap]').forEach((el) => el.remove()) } catch (e) {}
+    try { document.querySelectorAll('[' + AUG + ']').forEach((el) => el.remove()) } catch (e) {}
+  }
+  let tries = 0
+  switchTimer = setInterval(() => {
+    if (activateDataMenus()) {
+      if (switchTimer) { clearInterval(switchTimer); switchTimer = null }
+      disposeDomAug()
+      return
+    }
+    if (++tries >= 20) { if (switchTimer) { clearInterval(switchTimer); switchTimer = null } }
+  }, 100)
+  return disposeDomAug
 }
 
-// Left-side per-session status dot (DOM shim). The color is driven by DSH's
-// REAL session status, read from the row's own StateDot ([data-state]):
-//   手动标记未读（蓝） = 用户在 ⋯ 菜单或点击圆点手动标记，localStorage 持久化（最高优先级）
-//   工作中（黄）       = DSH state 'ongoing'（旧版兼容 'running'）
-//   需用户反馈（琥珀） = DSH state 'warning'（有追问需用户反馈）
-//   完成后未读（绿）   = DSH state 'done' 且用户尚未读过（read 集合）
-//   完成已读（不显示） = DSH state 'done' 且已读过（read 集合持久化）
-// 手动未读集合 + read 集合均持久化于 localStorage；打开过即记入 read，绿点不再出现。
+// Left-side per-session status dot (DOM shim).
+// DSH 的 StateDot 原样保留（缓冲圈 / 琥珀 / 绿 / 红都按官方口径），插件只补它
+// 没有的那条语义：手动标记未读（蓝，localStorage 持久化，占同一个状态槽）。
 // 另外：进入回收站的会话会整行隐藏（不出现在「未分组」里）。
 function installSidebarStatusDots() {
   if (typeof document === 'undefined') return
@@ -3257,6 +3401,44 @@ function installSidebarStatusDots() {
   const DSM_OVERFLOW_WRITE = 'data-dsm-overflow-write'
   const DSM_OVERFLOW_VER = 'data-dsm-overflow-ver'
   const DSM_OVERFLOW_HIDDEN = 'data-dsm-overflow-hidden'
+  // issue #27：展开按钮的隐藏改成 CSS 规则驱动。
+  //
+  // 3.7.10 用内联 `style.display='none'` 藏按钮，可按钮是原生 React 托管的节点：
+  // 列表数据一变（标题同步 / 状态刷新 / 水位线调整）React 就重建它，内联样式
+  // 连同 dataset 一起消失、原生旧计数文案回来，MutationObserver 再藏一次 ——
+  // 用户看到的就是「展开其余 N 个会话」在显示与隐藏之间振荡。
+  // 改成按 row-key 生成一条全局规则：节点被重建多少次，只要 key 相同就立刻
+  // 命中，不再和 React 抢同一个 style 属性。
+  let overflowHideStyle = null
+  const overflowHiddenKeys = new Set()
+  const flushOverflowHide = () => {
+    if (!overflowHiddenKeys.size) {
+      if (overflowHideStyle && overflowHideStyle.parentNode) overflowHideStyle.parentNode.removeChild(overflowHideStyle)
+      overflowHideStyle = null
+      return
+    }
+    if (!overflowHideStyle) {
+      overflowHideStyle = document.createElement('style')
+      overflowHideStyle.setAttribute('data-dsm-overflow-hide', '')
+      document.head.appendChild(overflowHideStyle)
+    }
+    const selectors = [...overflowHiddenKeys].map((k) => '[data-row-key="overflow:' + String(k).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]')
+    const css = selectors.join(',') + '{display:none!important}'
+    if (overflowHideStyle.textContent !== css) overflowHideStyle.textContent = css
+  }
+  const setOverflowHidden = (btn, hidden) => {
+    const key = (btn.getAttribute('data-row-key') || '').slice('overflow:'.length)
+    if (key) {
+      if (hidden) overflowHiddenKeys.add(key)
+      else overflowHiddenKeys.delete(key)
+    }
+    if (hidden) {
+      if (!btn.hasAttribute(DSM_OVERFLOW_HIDDEN)) btn.setAttribute(DSM_OVERFLOW_HIDDEN, '')
+    } else if (btn.hasAttribute(DSM_OVERFLOW_HIDDEN)) {
+      btn.removeAttribute(DSM_OVERFLOW_HIDDEN)
+    }
+    if (key) flushOverflowHide()
+  }
   let overflowDebugged = false
   const debugOverflowOnce = (msg) => {
     if (overflowDebugged) return
@@ -3279,20 +3461,6 @@ function installSidebarStatusDots() {
   const activeRowId = () => {
     const sel = document.querySelector('[role="treeitem"][aria-selected="true"]')
     return sel ? rowId(sel) : null
-  }
-  // Dot colors per the user's scheme. We read DSH's REAL session status from the
-  // row's own StateDot (its [data-state] attr) and recolor it:
-  //   ongoing/running → 黄  工作中
-  //   warning  → 琥珀 有追问需用户反馈
-  //   done     → 绿  完成后未读（读过则不再显示）
-  //   error    → 红  出错/需关注（与 DSH 自带 StateDot 一致）
-  //   (manual  → 蓝  手动标记未读，最高优先级)
-  const COLOR = {
-    manual: 'var(--dsw-alias-state-business-primary)',        // 蓝 手动标记未读
-    running: '#EAB308',                                       // 黄 工作中 (DSH running)
-    feedback: 'var(--dsw-alias-state-warn-primary, #F59E0B)', // 琥珀 需用户反馈 (DSH warning)
-    done: 'var(--dsw-alias-state-success-primary)',           // 绿 完成后未读 (DSH done)
-    error: 'var(--dsw-alias-state-error-primary)',            // 红 出错/需关注 (DSH error)
   }
   const manualUnread = dsmLoadManual()
   // v3.6.2 #2：原 WeakSet「首绘一次即终身免改」升级为 WeakMap 所有权记录
@@ -3439,7 +3607,13 @@ function installSidebarStatusDots() {
         // 拿不到 group.sessions / 数组为空 = 不知道 → 按非空处理，保持显示。
         const group = sidebarAdapter.recognizeGroupQuiet(row)
         const sessions = group && Array.isArray(group.sessions) ? group.sessions : null
-        setGroupHidden(scope, aliveSessionCount(sessions, hiddenIdSet()) === 0)
+        // 当前会话就在本组时绝不藏（见 shouldHideEmptyGroup）：上游只渲染「当前会话」
+        // 那一条 blank 行，插件又把 blank 行一律隐藏，于是组内可见数为 0；
+        // 若照旧按 aliveSessionCount 判空，会把用户正在用的工作区连标题和「+」一起藏掉。
+        setGroupHidden(scope, shouldHideEmptyGroup(
+          aliveSessionCount(sessions, hiddenIdSet()),
+          group !== null && group.containsCurrent === true,
+        ))
       } catch (e) { /* 单组失败不影响其它组 */ }
     })
   }
@@ -3615,15 +3789,11 @@ function installSidebarStatusDots() {
     }
     const plan = overflowPlan(baseline, more)
     if (plan.hide) {
-      if (btn.style.display !== 'none') btn.style.display = 'none'
-      if (!btn.hasAttribute(DSM_OVERFLOW_HIDDEN)) btn.setAttribute(DSM_OVERFLOW_HIDDEN, '')
+      setOverflowHidden(btn, true)
       btn.setAttribute(DSM_OVERFLOW_WRITE, baseline)
       return
     }
-    if (btn.hasAttribute(DSM_OVERFLOW_HIDDEN)) {
-      btn.style.display = ''
-      btn.removeAttribute(DSM_OVERFLOW_HIDDEN)
-    }
+    setOverflowHidden(btn, false)
     if (plan.changed) {
       // 同值不写：写入会触发 characterData 观察 → 重绘，必须保持幂等。
       if (btn.textContent !== plan.text) btn.textContent = plan.text
@@ -3636,10 +3806,7 @@ function installSidebarStatusDots() {
   function restoreOverflowButton(btn) {
     const verbatim = btn.getAttribute(DSM_OVERFLOW_BASE)
     if (verbatim != null && btn.textContent !== verbatim) btn.textContent = verbatim
-    if (btn.hasAttribute(DSM_OVERFLOW_HIDDEN)) {
-      btn.style.display = ''
-      btn.removeAttribute(DSM_OVERFLOW_HIDDEN)
-    }
+    setOverflowHidden(btn, false)
   }
   const paint = () => {
     if (sidebarAdapter.disabled) return
@@ -3842,29 +4009,33 @@ function installSidebarStatusDots() {
           }
         }
       }
-      // Read DSH's REAL session status from the row's own StateDot and recolor
-      // it with the user's scheme (we also hide DSH's dot so only ours shows).
+      // DSH 的状态点原样交回；只有手动标记未读时，插件用蓝点占住同一个状态槽。
       const sd = row.querySelector('[data-state]')
-      if (sd) sd.style.display = 'none'
-      let dot = row.querySelector('[' + DOT + ']')
-      const state = dotStateFor({ manualUnread: manualUnread.has(id), dataState: sd ? sd.getAttribute('data-state') : '', isActive: activeId === id })
-      const color = state ? COLOR[state] : null
-      if (!color) { if (dot) dot.remove(); return }
-      if (!dot) {
-        dot = document.createElement('span')
-        dot.setAttribute(DOT, '')
-        dot.className = 'dsm-dot'
-        if (!row.hasAttribute('data-dsm-pos')) {
-          if (getComputedStyle(row).position === 'static') row.style.position = 'relative'
-          row.setAttribute('data-dsm-pos', '')
+      const own = row.querySelector('[' + DOT + ']')
+      if (manualUnread.has(id)) {
+        if (sd && sd.style.display !== 'none') sd.style.display = 'none'
+        if (!own) {
+          const dot = document.createElement('span')
+          dot.setAttribute(DOT, '')
+          dot.className = 'dsm-dot dsm-dot-manual'
+          dot.title = '已手动标记未读（点击取消）'
+          dot.setAttribute('aria-label', dot.title)
+          if (!row.hasAttribute('data-dsm-pos')) {
+            if (getComputedStyle(row).position === 'static') row.style.position = 'relative'
+            row.setAttribute('data-dsm-pos', '')
+          }
+          dot.addEventListener('click', (e) => {
+            e.stopPropagation(); e.preventDefault()
+            dsmToggleManual(id)
+          })
+          row.insertBefore(dot, row.firstChild)
         }
-        dot.addEventListener('click', (e) => {
-          e.stopPropagation(); e.preventDefault()
-          dsmToggleManual(id)
-        })
-        row.insertBefore(dot, row.firstChild)
+      } else {
+        if (own) own.remove()
+        // 只在确实被我们藏过时才恢复：每帧重写 style 会命中 MutationObserver 自己的
+        // attributeFilter('style')，导致每帧重绘一次。
+        if (sd && sd.style.display === 'none') sd.style.display = ''
       }
-      dot.style.background = color
     })
     dsmSyncEmptyGroups(purgedNow)
     // issue #16：等隐藏标记落定后再校准展开计数（数据层优先，DOM 标记兜底）。
@@ -4417,7 +4588,11 @@ export function apply(ctx) {
   }
   ctx.effect(() => () => { clearInterval(beatTimer); if (beatAc) beatAc.abort() })
   installSettingsNavIcons(ctx)
-  installSidebarSessionMenuAug()
+  // 会话 ⋯ 菜单：0.2.2+ 走官方 contextMenus 数据注册，旧版回退 DOM 注入。
+  // 返回的 disposer 挂到 cordis effect，插件停用 / HMR 时把 MutationObserver
+  // 与注入节点一并摘干净（数据菜单那条路自带 ctx.effect，不需要额外清理）。
+  const disposeMenuAug = installSidebarSessionMenuAug(ctx)
+  if (disposeMenuAug) ctx.effect(() => disposeMenuAug)
   // 侧栏增强的卸载清退挂到 cordis effect：插件停用/HMR 时 interval、
   // MutationObserver 与全部注入 DOM 一并回收（否则泄漏到页面关闭）。
   const disposeSidebarDots = installSidebarStatusDots()
