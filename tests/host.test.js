@@ -93,6 +93,40 @@ test('reports the runtime action capabilities used by the UI', async () => {
   assert.equal(result.body.actions.restoreIndexedSession.available, true)
 })
 
+test('echoes a whitelisted UI probe next to the menu channel', async () => {
+  const result = await call('/archived-sessions/capabilities', {
+    menuMode: 'contextMenus',
+    uiProbe: {
+      navSection: 1, navIcons: 1, navOwn: 1, navFallback: 0, navIconRenders: 3,
+      sessionRows: 4, workspaceRows: 2, overflowRows: 1, stateDots: 2,
+      tokenBgLayer2: '#fff', tokenWarn: '#f59e0b',
+      // 白名单之外的字段绝不能回显：客户端不该成为任意 JSON 的传声筒。
+      title: 'must not leak', body: 'must not leak',
+    },
+  })
+  assert.equal(result.status, 200)
+  assert.equal(result.body.clientMenu.mode, 'contextMenus')
+  const ui = result.body.clientUi
+  assert.equal(ui.navSection, 1)
+  assert.equal(ui.navIcons, 1)
+  assert.equal(ui.navOwn, 1)
+  assert.equal(ui.navIconRenders, 3)
+  assert.equal(ui.overflowRows, 1)
+  assert.equal(ui.tokenBgLayer2, '#fff')
+  assert.equal(ui.title, undefined)
+  assert.equal(ui.body, undefined)
+  assert.equal(typeof ui.at, 'number')
+})
+
+test('rejects malformed probe values instead of echoing them', async () => {
+  const result = await call('/archived-sessions/capabilities', {
+    uiProbe: { navIcons: -1, navOwn: 'x', tokenWarn: 'a'.repeat(100) },
+  })
+  assert.equal(result.body.clientUi.navIcons, null)
+  assert.equal(result.body.clientUi.navOwn, null)
+  assert.equal(result.body.clientUi.tokenWarn.length, 40)
+})
+
 test('reads a legacy trash array through schema v2 API', async () => {
   const result = await call('/archived-sessions/trash/list')
   assert.equal(result.status, 200)

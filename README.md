@@ -224,7 +224,7 @@ src/client/logic.js        可单测的纯逻辑（折叠、计数、筛选、�
 | POST | `/archived-sessions/storage` | 存储占用聚合（按工作区排行 + 最大的会话）`{ topN }` |
 | POST | `/archived-sessions/auto-archive/settings` | 读取或更新自动归档策略 `{ inactiveDays, skipStarred }`；读取时惰性触发每日检查 |
 | POST | `/archived-sessions/auto-archive/run` | 立即执行一次自动归档检查（忽略每日节流） |
-| POST | `/archived-sessions/capabilities` | 返回当前持久化代际、读取 / 归档 / 回收站 / 永久删除 / 跨工作区移动能力，以及客户端菜单通道回显 `clientMenu: { mode, at }`（客户端每次探测时上报 `{ menuMode }`，`mode` 为 `contextMenus` 或 `dom`） |
+| POST | `/archived-sessions/capabilities` | 返回当前持久化代际、读取 / 归档 / 回收站 / 永久删除 / 跨工作区移动能力，以及两份客户端回显：`clientMenu: { mode, at }`（菜单通道，`contextMenus` 或 `dom`）与 `clientUi: { navSection, navIcons, navOwn, navFallback, navIconRenders, sessionRows, workspaceRows, overflowRows, stateDots, tokenBgLayer2, tokenWarn, at }`（界面自证：只含计数与令牌解析值，不含任何标题或正文） |
 
 > 删除会话默认进入回收站，只有回收站内的「彻底删除」才会物理移除日志。被彻底删除的会话由前端永久隐藏，避免 DSH 运行时缓存使其重新出现在侧栏或「未分组」中。
 
@@ -236,6 +236,7 @@ src/client/logic.js        可单测的纯逻辑（折叠、计数、筛选、�
 
 | Runtime | 状态 | 关键适配 |
 |---|---|---|
+| `0.2.2-rc.3` | 已实测 | 左导航图标走官方 `settings.section.icon` 槽（不再靠 CSS 遮罩叠出第二颗）；菜单解析改为同步 + 快照预热（rc.3 对异步 `resolve` 有 1s 预算）；重复注册守卫（rc.3 同 id 重复注册直接抛错）；设计令牌直连 `bg-layer-1/2` 等现行名；空白判定补齐 0.2.2 的状态类事件 |
 | `0.2.2-rc.1` | 已实测 | 会话菜单改官方 `contextMenus` 数据注册；删除同步写入原生归档；`inject` 只保留真实存在的包 |
 | `0.2.1-rc.2` | 已实测 | 会话格式仍 v4；persistence 改为 cordis 插件形态（双形态均可挂载）；侧栏行包 wrapper、折叠计数改 `sessionCount` 校准；空分组容器改为无 role 的 `groupSection` |
 | `0.2.0-rc.1` / `0.2.0-rc.2` | 已实测 | `ctx.sessions` 退化为数据流服务，打开会话改走 `uiWorkspace.openSession`；peer 范围放宽到 `>=0.1.0-rc.6`；存储域为领域数据形式；活跃会话改由客户端心跳上报 |

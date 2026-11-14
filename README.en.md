@@ -224,7 +224,7 @@ src/client/logic.js        unit-tested pure logic (folding, counting, filtering,
 | POST | `/archived-sessions/storage` | Storage aggregation (per-workspace ranking + largest sessions) `{ topN }` |
 | POST | `/archived-sessions/auto-archive/settings` | Read or update the auto-archive policy `{ inactiveDays, skipStarred }`; reading lazily triggers the daily check |
 | POST | `/archived-sessions/auto-archive/run` | Run the auto-archive check once, ignoring the daily throttle |
-| POST | `/archived-sessions/capabilities` | Current persistence generation, read / archive / recycle-bin / purge / cross-workspace-move capabilities, plus the client menu channel echo `clientMenu: { mode, at }` (the client reports `{ menuMode }` on each probe; `mode` is `contextMenus` or `dom`) |
+| POST | `/archived-sessions/capabilities` | Current persistence generation, read / archive / recycle-bin / purge / cross-workspace-move capabilities, plus two client echoes: `clientMenu: { mode, at }` (menu channel, `contextMenus` or `dom`) and `clientUi: { navSection, navIcons, navOwn, navFallback, navIconRenders, sessionRows, workspaceRows, overflowRows, stateDots, tokenBgLayer2, tokenWarn, at }` (UI self-evidence: counts and resolved token values only, never titles or message bodies) |
 
 > Deleting a session moves it to the recycle bin by default; only "permanently delete" inside the recycle bin physically removes the log. Permanently deleted sessions are hidden forever on the client side so they don't reappear in the sidebar or "ungrouped" due to DSH runtime caching.
 
@@ -236,6 +236,7 @@ src/client/logic.js        unit-tested pure logic (folding, counting, filtering,
 
 | Runtime | Status | Key adaptations |
 |---|---|---|
+| `0.2.2-rc.3` | verified | The left-nav icon uses the official `settings.section.icon` slot (no more second glyph drawn by a CSS mask); menu resolution is synchronous with a pre-warmed snapshot (rc.3 gives async `resolve` a 1 s budget); duplicate registration guarded (rc.3 throws on the same id twice); design tokens point at the current names (`bg-layer-1/2` …); blank detection covers the 0.2.2 state events |
 | `0.2.2-rc.1` | verified | Session menu moved to the official `contextMenus` data registration; delete also writes the native archive flag; `inject` keeps only packages that really exist |
 | `0.2.1-rc.2` | verified | Session format still v4; persistence became a cordis plugin (both shapes mount); sidebar wraps rows, folded counts calibrated from `sessionCount`; the empty-group container is the role-less `groupSection` |
 | `0.2.0-rc.1` / `0.2.0-rc.2` | verified | `ctx.sessions` became a data-stream service, opening a session goes through `uiWorkspace.openSession`; peer ranges widened to `>=0.1.0-rc.6`; storage domain is domain-data shaped; the active session is reported by the client heartbeat |

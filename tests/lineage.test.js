@@ -46,6 +46,22 @@ test('isEmptyEventTypes classifies 0.1.3 lifecycle-only logs as empty', () => {
   assert.ok(Number.isFinite(EMPTY_DECODE_LIMIT) && EMPTY_DECODE_LIMIT >= 4096)
 })
 
+// 0.2.2 起 DSH 新增了一批「状态/配置」事件（预设、模型、计划模式、团队模式、
+// 工作目录……）。它们只记录设置，不产生消息；若不放行，任何在设置面板动过一次
+// 却没发消息的会话就永远进不了「空白」分类。放行的安全前提是：本判定要求
+// **全部**事件都是噪声，任何一条 user/assistant/tool 事件都仍然判非空。
+test('isEmptyEventTypes treats 0.2.2 state/config events as non-content', () => {
+  const stateOnly = ['agent-preset/selected', 'model/selection', 'plan/mode', 'team/mode',
+    'working-directory/change', 'goal/change', 'schedule/change', 'session/end-seed', 'session/title',
+    'subagent/model-selection-policy']
+  assert.equal(isEmptyEventTypes(stateOnly), true)
+  assert.equal(isEmptyEventTypes(['agent-preset/selected', 'permission/preset', 'sandbox/mode']), true)
+  // 只要掺进一条真实内容，立刻回到非空——白名单不会把有消息的会话吃掉。
+  for (const content of ['user/message', 'assistant/message', 'tool/call', 'tool/result', 'turn/start']) {
+    assert.equal(isEmptyEventTypes(['agent-preset/selected', 'model/selection', content]), false, content)
+  }
+})
+
 // ---- issue #18 第 5 条：插件注入上下文不算内容 -----------------------------
 // 记忆插件把 profile / 指令 splice 进下一轮 inbox（agent/inbox/spliced），
 // 界面上是一条空会话，却因为有「内容事件」永远进不了「空白」分类。

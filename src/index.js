@@ -2143,6 +2143,15 @@ export function apply(ctx) {
     // 排障时不必打开 devtools 就能判断「菜单三项没出来」到底是因为走了旧 DOM
     // 路径、还是注册压根没发生（issue #28 的定位成本就花在这上面）。
     let clientMenuProbe = null
+    // 界面自证：设置左导航图标数、侧栏行数、展开按钮数、关键令牌的解析值。
+    // 只收计数与短字符串，绝不接收标题/正文；字段全部白名单化，避免把任意
+    // JSON 回显出去。
+    let clientUiProbe = null
+    const uiProbeNumber = (probe, key) => {
+      const v = probe[key]
+      return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v < 1e6 ? Math.round(v) : null
+    }
+    const uiProbeText = (probe, key) => (typeof probe[key] === 'string' ? probe[key].slice(0, 40) : null)
     disposers.push(ctx.webServer.register({
       kind: 'exact',
       path: '/archived-sessions/capabilities',
@@ -2151,8 +2160,25 @@ export function apply(ctx) {
           const body = await readJsonBody(req)
           const mode = body && typeof body.menuMode === 'string' ? body.menuMode : null
           if (mode) clientMenuProbe = { mode, at: Date.now() }
+          const probe = body && body.uiProbe && typeof body.uiProbe === 'object' ? body.uiProbe : null
+          if (probe) {
+            clientUiProbe = {
+              navSection: uiProbeNumber(probe, 'navSection'),
+              navIcons: uiProbeNumber(probe, 'navIcons'),
+              navOwn: uiProbeNumber(probe, 'navOwn'),
+              navFallback: uiProbeNumber(probe, 'navFallback'),
+              navIconRenders: uiProbeNumber(probe, 'navIconRenders'),
+              sessionRows: uiProbeNumber(probe, 'sessionRows'),
+              workspaceRows: uiProbeNumber(probe, 'workspaceRows'),
+              overflowRows: uiProbeNumber(probe, 'overflowRows'),
+              stateDots: uiProbeNumber(probe, 'stateDots'),
+              tokenBgLayer2: uiProbeText(probe, 'tokenBgLayer2'),
+              tokenWarn: uiProbeText(probe, 'tokenWarn'),
+              at: Date.now(),
+            }
+          }
         } catch (e) { /* 老客户端不带 body：保留上一次记录 */ }
-        json(res, { ...capabilities, buildStamp: BUILD_STAMP, clientMenu: clientMenuProbe })
+        json(res, { ...capabilities, buildStamp: BUILD_STAMP, clientMenu: clientMenuProbe, clientUi: clientUiProbe })
       },
     }))
 

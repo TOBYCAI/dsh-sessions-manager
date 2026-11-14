@@ -33,8 +33,8 @@ export function isEmptyLogSize(sizeBytes, cwd) {
 // 解码在宿主侧进行（index.js 的 refineEmptyLineage：只对压缩体积 ≤
 // EMPTY_DECODE_LIMIT 的候选调官方 inspectSession），这里只放纯函数与常量。
 //
-// 已知的生命周期事件（0.1.3-alpha.1 实测，会话创建时一次性写入）。'session'
-// 是头部行自身——inspectSession 若把头部当事件回传，它恒存在于每本日志，
+// 已知的生命周期/状态事件（会话创建与运行中由 DSH 自身写入，不是内容）。
+// 'session' 是头部行自身——inspectSession 若把头部当事件回传，它恒存在于每本日志，
 // 放行不削弱判定；任何未知类型都按内容处理（宁可漏判，不可错杀）。
 export const EMPTY_DECODE_LIMIT = 8192
 
@@ -43,6 +43,20 @@ const LIFECYCLE_EVENT_TYPES = new Set([
   'permission/preset',
   'sandbox/mode',
   'approval/policy',
+  // 0.2.2 起新增的状态/配置事件（0.2.2-rc.3 的 KNOWN_SESSION_EVENT_TYPES 复核）：
+  // 预设选择、模型选择、计划模式、团队模式、工作目录切换等，全部只记录「设置」。
+  // 放行它们不影响有内容的会话——本判定要求「所有事件都是噪声」才算空白，
+  // 只要有一条 user/assistant/tool 事件就照旧判为非空。
+  'agent-preset/selected',
+  'model/selection',
+  'subagent/model-selection-policy',
+  'plan/mode',
+  'team/mode',
+  'working-directory/change',
+  'goal/change',
+  'schedule/change',
+  'session/end-seed',
+  'session/title',
 ])
 
 // 注入型事件：`agent/inbox/spliced` 把消息写进下一轮的 inbox。它不是用户输入，

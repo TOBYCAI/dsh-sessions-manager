@@ -21,13 +21,11 @@ function loadPanelPrefs() {
 }
 
 const CSS = `
-/* 兼容 shim（2026-09-30 对 0.2.0-rc.2 实测）：当前 runtime 的设计令牌不再提供
-   fill-elevated / fill-subtle / fill-secondary / label-inverted / state-warning-primary
-   这几个 alias，缺位会让输入框、下拉框、卡片、徽标整体回退成透明。这里把它们重映射
-   到 runtime 现有 token（官方 Input/Pill 分别用 bg-layer-1 / bg-layer-2）。选择器用
-   :where(:root)（零特异性）：runtime 将来恢复官方定义时自动胜出，shim 只在缺位时兜底。
-   state-warning-primary 是旧名，现名为 state-warn-primary。 */
-:where(:root){--dsw-alias-fill-elevated:var(--dsw-alias-bg-layer-2);--dsw-alias-fill-subtle:var(--dsw-alias-bg-layer-1);--dsw-alias-fill-secondary:var(--dsw-alias-bg-layer-2);--dsw-alias-label-inverted:var(--dsw-alias-label-primary-foreground);--dsw-alias-state-warning-primary:var(--dsw-alias-state-warn-primary)}
+/* 设计令牌直连 runtime：0.2.0 起 fill-elevated / fill-subtle / fill-secondary /
+   label-inverted / state-warning-primary 这五个 alias 已不存在（0.2.2-rc.3 令牌表
+   复核仍然没有），一律改用 bg-layer-1 / bg-layer-2 / label-primary-foreground /
+   state-warn-primary。3.7.12 及更早版本靠一段 :where(:root) 重映射兜底，3.7.13
+   直接在引用处写新名——少一层间接，也不再把旧名重新注入全局命名空间。 */
 /* 原生 <select> 的弹出列表由 Chromium 按 color-scheme 绘制，不声明时暗色主题下
    仍是白底，叠加未适配的文字色导致不可读；跟随 DSH 的暗色主题标记切换。 */
 .archv{color-scheme:light}
@@ -39,9 +37,9 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .archv{--dsm-radius-tag:9px;--dsm-radius-ctl:9px;--dsm-radius-sheet:10px;--dsm-radius-card:12px;display:flex;flex-direction:column;gap:4px;max-width:800px;padding:8px 2px 28px}
 .archv-head{display:flex;align-items:center;gap:10px;margin:0 0 2px}
 .archv-title{font-size:16px;font-weight:650;color:var(--dsw-alias-label-primary);letter-spacing:-0.01em;margin:0}
-.archv-stamp{font-size:11px;font-weight:500;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-fill-secondary);border:1px solid var(--dsw-alias-border-l1);border-radius:999px;padding:2px 8px;white-space:nowrap;cursor:pointer;transition:color .15s ease,border-color .15s ease}
+.archv-stamp{font-size:11px;font-weight:500;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);border-radius:999px;padding:2px 8px;white-space:nowrap;cursor:pointer;transition:color .15s ease,border-color .15s ease}
 .archv-stamp:hover{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l3)}
-.archv-count{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-fill-subtle);border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:1px 8px;flex:none}
+.archv-count{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:1px 8px;flex:none}
 .archv-sub{font-size:12px;line-height:1.55;color:var(--dsw-alias-label-tertiary);margin:0 0 12px;max-width:64ch}
 .archv-err{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 12px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,transparent);border-radius:var(--dsm-radius-sheet);color:var(--dsw-alias-state-error-primary);font-size:12px;margin-bottom:10px}
 .archv-errretry{appearance:none;border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 45%,transparent);background:transparent;color:inherit;border-radius:8px;padding:4px 10px;font-size:11px;cursor:pointer;flex:none}
@@ -60,7 +58,7 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .sess-farrow:hover{color:var(--dsw-alias-label-primary)}
 .sess-farrow svg{display:block;transition:transform .22s ease}
 .sess-fwrap.sess-fmore-open .sess-farrow svg,.sess-fwrap.sess-fsec-on .sess-farrow svg{transform:rotate(180deg)}
-.sess-fbtn{appearance:none;min-height:30px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-secondary);border-radius:999px;font-size:12px;font-weight:500;cursor:pointer}
+.sess-fbtn{appearance:none;min-height:30px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);border-radius:999px;font-size:12px;font-weight:500;cursor:pointer}
 .sess-fbtn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .sess-fbtn-on{background:var(--dsw-alias-interactive-bg-active);color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l3)}
 .sess-tools{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin:0 0 8px}
@@ -84,7 +82,7 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .dsm-kid-acts .archv-btn{min-height:26px;padding:0 9px;font-size:11px}
 .sess-field{display:flex;flex-direction:column;gap:5px;min-width:0}
 .sess-field label{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary)}
-.sess-field input,.sess-field select{box-sizing:border-box;width:100%;min-height:36px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}
+.sess-field input,.sess-field select{box-sizing:border-box;width:100%;min-height:36px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}
 .sess-results{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-label-tertiary);margin:0 0 4px}
 /* T4 后计数行右侧挂了「保存筛选」控件组，正文独占左侧可收缩。 */
 .sess-results-main{flex:1 1 auto;min-width:0}
@@ -94,7 +92,7 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .sess-batch-pin{position:sticky;top:0;z-index:30;margin:0 -2px 4px;padding:8px 4px 6px;background:var(--dsw-alias-bg-layer-1);border-bottom:1px solid var(--dsw-alias-border-l2);box-shadow:0 6px 14px rgb(0 0 0/.08)}
 .sess-btntext{font-size:12px;color:var(--dsw-alias-label-tertiary);flex:none}
 .archv-list{display:flex;flex-direction:column;gap:8px}
-.archv-card{display:flex;flex-direction:column;align-items:stretch;gap:0;padding:12px 14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-card);background:var(--dsw-alias-fill-elevated);transition:border-color .15s ease,background-color .15s ease}
+.archv-card{display:flex;flex-direction:column;align-items:stretch;gap:0;padding:12px 14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-card);background:var(--dsw-alias-bg-layer-2);transition:border-color .15s ease,background-color .15s ease}
 .archv-card:hover{border-color:var(--dsw-alias-border-l4)}
 .archv-card-exp{border-color:var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-1)}
 .archv-row{display:flex;align-items:center;gap:14px;width:100%;min-width:0}
@@ -102,16 +100,16 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .archv-titlerow{display:flex;align-items:center;gap:8px;min-width:0}
 .archv-name{font-size:13px;font-weight:550;color:var(--dsw-alias-label-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:0 1 auto}
 .archv-meta{display:flex;align-items:center;gap:7px;flex-wrap:nowrap;min-width:0;overflow:hidden}
-.archv-wtag{display:inline-flex;align-items:center;gap:4px;min-width:0;flex:0 1 auto;font-size:11px;font-weight:500;line-height:1;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-fill-subtle);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-tag);padding:3px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.archv-wtag{display:inline-flex;align-items:center;gap:4px;min-width:0;flex:0 1 auto;font-size:11px;font-weight:500;line-height:1;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-tag);padding:3px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .archv-wgone{border-style:dashed;color:var(--dsw-alias-state-error-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 55%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 7%,transparent)}
 .archv-active{color:var(--dsw-alias-state-success-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 8%,transparent)}
 .archv-date{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;flex:none}
 .dsm-branch-chip{display:inline-flex;align-items:center;flex:none;min-height:22px;padding:0 9px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-success-primary) 45%,transparent);border-radius:var(--dsm-radius-tag);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 10%,transparent);color:var(--dsw-alias-state-success-primary);font-size:11px;font-weight:500;line-height:1;white-space:nowrap}
-.dsm-empty-chip{display:inline-flex;align-items:center;flex:none;min-height:22px;padding:0 9px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-tag);background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:500;line-height:1;white-space:nowrap}
+.dsm-empty-chip{display:inline-flex;align-items:center;flex:none;min-height:22px;padding:0 9px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-tag);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:500;line-height:1;white-space:nowrap}
 /* 3.7.0 T4 标签 chip 系：卡片标题行内、分支/空白 chip 之后。警示色系区别于
    分支（绿）/空白（灰），名字超长省略号；+N 计数 chip 中性色。 */
 .dsm-tagchip{display:inline-flex;align-items:center;flex:none;max-width:9em;min-height:22px;padding:0 8px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary,#EAB308) 45%,transparent);border-radius:var(--dsm-radius-tag);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#EAB308) 10%,transparent);color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:500;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.dsm-tagchip-more{max-width:none;color:var(--dsw-alias-label-tertiary);border-color:var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-subtle)}
+.dsm-tagchip-more{max-width:none;color:var(--dsw-alias-label-tertiary);border-color:var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1)}
 .archv-id{appearance:none;border:none;background:none;padding:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px;color:var(--dsw-alias-label-tertiary);flex:none;margin-left:auto;white-space:nowrap;cursor:pointer;transition:color .12s ease}
 .archv-id:hover{color:var(--dsw-alias-label-secondary)}
 .archv-id-copied{color:var(--dsw-alias-state-business-primary)}
@@ -125,7 +123,7 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .archv-star-on svg{fill:currentColor}
 .archv-body{flex:1;min-width:0;display:flex;align-items:center;gap:12px}
 .archv-actions{display:flex;gap:8px;flex:none;flex-wrap:nowrap;justify-content:flex-end}
-.archv-btn{appearance:none;min-height:32px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-secondary);border-radius:var(--dsm-radius-ctl);font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-align:center;transition:background-color .15s ease,border-color .15s ease,color .15s ease}
+.archv-btn{appearance:none;min-height:32px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);border-radius:var(--dsm-radius-ctl);font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-align:center;transition:background-color .15s ease,border-color .15s ease,color .15s ease}
 .archv-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .archv-btn:disabled{opacity:.5;cursor:default}
 .archv-del{color:var(--dsw-alias-state-error-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 45%,transparent)}
@@ -134,9 +132,9 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .archv-go:hover:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 10%,transparent);color:var(--dsw-alias-state-business-primary)}
 .archv-empty{display:flex;align-items:center;gap:10px;padding:20px 14px;border:1px dashed var(--dsw-alias-border-l3);border-radius:var(--dsm-radius-card);color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}
 .archv-skel{display:flex;flex-direction:column;gap:8px}
-.archv-skel-card{height:58px;border-radius:var(--dsm-radius-card);background:var(--dsw-alias-fill-subtle);position:relative;overflow:hidden}
-.archv-skel-card::after{content:'';position:absolute;inset:0;transform:translateX(-100%);background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--dsw-alias-fill-elevated) 75%,transparent),transparent);animation:archv-shimmer 1.4s infinite}
-.archv-status{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:2147483601;background:linear-gradient(var(--dsw-alias-fill-elevated),var(--dsw-alias-fill-elevated)),var(--dsw-alias-bg-layer-1,Canvas);border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary);padding:9px 16px;border-radius:999px;font-size:12px;line-height:1.5;text-align:center;box-shadow:0 8px 24px rgb(0 0 0/.25);display:flex;align-items:center;gap:8px;animation:archv-pop .18s ease-out;max-width:min(92vw,480px);cursor:pointer}
+.archv-skel-card{height:58px;border-radius:var(--dsm-radius-card);background:var(--dsw-alias-bg-layer-1);position:relative;overflow:hidden}
+.archv-skel-card::after{content:'';position:absolute;inset:0;transform:translateX(-100%);background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--dsw-alias-bg-layer-2) 75%,transparent),transparent);animation:archv-shimmer 1.4s infinite}
+.archv-status{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:2147483601;background:linear-gradient(var(--dsw-alias-bg-layer-2),var(--dsw-alias-bg-layer-2)),var(--dsw-alias-bg-layer-1,Canvas);border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary);padding:9px 16px;border-radius:999px;font-size:12px;line-height:1.5;text-align:center;box-shadow:0 8px 24px rgb(0 0 0/.25);display:flex;align-items:center;gap:8px;animation:archv-pop .18s ease-out;max-width:min(92vw,480px);cursor:pointer}
 .archv-status-long{border-radius:14px;text-align:left}
 .archv-spin{width:12px;height:12px;border:2px solid color-mix(in srgb,var(--dsw-alias-label-secondary) 35%,transparent);border-top-color:var(--dsw-alias-label-secondary);border-radius:50%;animation:archv-rot .8s linear infinite;flex:none}
 @keyframes archv-shimmer{100%{transform:translateX(100%)}}
@@ -146,28 +144,28 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .archv-status-err{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary);font-weight:500}
 @media (prefers-reduced-motion:reduce){.archv-skel-card::after{animation:none}.archv-card,.archv-btn,.archv-star{transition:none}.archv-star:hover,.archv-star:active{transform:none}.archv-status,.archv-spin{animation:none}}
 @media (max-width:640px){.archv-card{flex-direction:column;align-items:stretch;gap:10px}.archv-actions{justify-content:flex-end}.sess-tools,.sess-tools-4,.sess-tools-5{grid-template-columns:1fr}.sess-fbtn,.archv-btn{min-height:40px}.archv-star{width:30px;height:30px}.archv-star svg{width:22px;height:22px}.dsm-kids{margin-left:10px}.archv-titlerow{flex-wrap:wrap}.dsm-kid-row{flex-wrap:wrap}.dsm-kid-acts{margin-left:0}}
-.mv-sheet{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:12px;margin-top:12px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-sheet);background:var(--dsw-alias-fill-subtle)}
+.mv-sheet{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:12px;margin-top:12px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-sheet);background:var(--dsw-alias-bg-layer-1)}
 .mv-sheet-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .mv-sheet-title{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary);margin:0}
 .mv-sheet-close{appearance:none;width:26px;height:26px;color:var(--dsw-alias-label-secondary);background:0 0;border:none;border-radius:7px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:16px;line-height:1}
 .mv-sheet-close:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.mv-seg{display:flex;gap:2px;padding:2px;background:var(--dsw-alias-fill-elevated);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-sheet);width:100%}
+.mv-seg{display:flex;gap:2px;padding:2px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-sheet);width:100%}
 .mv-segbtn{appearance:none;flex:1;min-height:30px;padding:0 12px;border:none;background:transparent;color:var(--dsw-alias-label-secondary);border-radius:8px;font-size:12px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px}
 .mv-segbtn:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
 .mv-segbtn-on{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);box-shadow:0 1px 2px rgb(0 0 0/.08)}
 .mv-field{display:flex;flex-direction:column;gap:6px}
 .mv-field label.mv-field-label{font-size:12px;font-weight:500;color:var(--dsw-alias-label-secondary)}
-.mv-field select,.mv-field input[type=text]{box-sizing:border-box;appearance:none;width:100%;min-height:34px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);font-size:12px;font-family:inherit}
+.mv-field select,.mv-field input[type=text]{box-sizing:border-box;appearance:none;width:100%;min-height:34px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font-size:12px;font-family:inherit}
 .mv-field select:focus-visible,.mv-field input[type=text]:focus-visible,.mv-sheet-close:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
 .mv-browse-row{display:flex;align-items:center;gap:8px}
 .mv-browse-row input[type=text]{flex:1;min-width:0}
 .mv-foot{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-top:2px}
 @media (max-width:640px){.archv-row{flex-wrap:wrap}.mv-sheet{padding:12px}}
-.dtl-sheet{margin-top:12px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-sheet);background:var(--dsw-alias-fill-subtle)}
+.dtl-sheet{margin-top:12px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-sheet);background:var(--dsw-alias-bg-layer-1)}
 .dtl-sheet-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .dtl-sheet-title{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary);margin:0}
 .dtl-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin-top:10px}
-.dtl-cell{display:flex;flex-direction:column;gap:2px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-fill-elevated);min-width:0}
+.dtl-cell{display:flex;flex-direction:column;gap:2px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-2);min-width:0}
 .dtl-k{font-size:11px;color:var(--dsw-alias-label-tertiary)}
 .dtl-v{font-size:12px;color:var(--dsw-alias-label-primary);word-break:break-all}
 .dtl-sec{margin-top:12px}
@@ -176,7 +174,7 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .dtl-note{margin-top:8px;font-size:11px;color:var(--dsw-alias-label-tertiary);line-height:1.5}
 .dtl-sec-t{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary);text-transform:uppercase;letter-spacing:.03em;margin-bottom:6px}
 .dtl-tags{display:flex;flex-wrap:wrap;gap:6px}
-.dtl-tag{display:inline-flex;font-size:11px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-fill-elevated);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-tag);padding:2px 8px}
+.dtl-tag{display:inline-flex;font-size:11px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-tag);padding:2px 8px}
 .dtl-list{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:var(--dsw-alias-label-secondary)}
 .dtl-list code,.dtl-paths code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:var(--dsw-alias-label-primary);word-break:break-all}
 .dtl-filetool{color:var(--dsw-alias-label-tertiary)}
@@ -207,15 +205,15 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .dsm-tagrow{display:flex;align-items:center;gap:8px;min-width:0;padding:6px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}
 .dsm-tagrow:last-child{border-bottom:none}
 .dsm-tag-name{flex:0 1 auto;min-width:0;font-size:12.5px;color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dsm-tag-input{box-sizing:border-box;flex:1 1 auto;min-width:0;min-height:28px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);font-size:12px;font-family:inherit}
+.dsm-tag-input{box-sizing:border-box;flex:1 1 auto;min-width:0;min-height:28px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font-size:12px;font-family:inherit}
 .dsm-tag-input:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
 .dsm-tag-acts{display:flex;align-items:center;gap:6px;flex:none;margin-left:auto}
 .dsm-tag-acts .archv-btn{min-height:26px;padding:0 9px;font-size:11px}
-.dsm-tag-acts select{appearance:none;min-height:26px;padding:0 6px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-secondary);font-size:11px;font-family:inherit;max-width:10em}
+.dsm-tag-acts select{appearance:none;min-height:26px;padding:0 6px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11px;font-family:inherit;max-width:10em}
 .dsm-fbar{display:flex;align-items:center;gap:6px;flex:none;margin-left:auto;flex-wrap:wrap}
 .dsm-fbar .archv-btn{min-height:24px;padding:0 8px;font-size:11px}
-.dsm-fbar select{appearance:none;min-height:24px;padding:0 6px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-secondary);font-size:11px;font-family:inherit;max-width:12em}
-.dsm-fbar input{box-sizing:border-box;min-width:9em;min-height:24px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);font-size:11px;font-family:inherit}
+.dsm-fbar select{appearance:none;min-height:24px;padding:0 6px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11px;font-family:inherit;max-width:12em}
+.dsm-fbar input{box-sizing:border-box;min-width:9em;min-height:24px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font-size:11px;font-family:inherit}
 @media (max-width:640px){.dsm-fbar{margin-left:0;width:100%;justify-content:flex-end}.dsm-tag-acts{margin-left:auto;flex-wrap:wrap;justify-content:flex-end}}
 `
 
@@ -456,7 +454,13 @@ const NAV_CSS = `
 //
 // 槽签名为 `{ size, active }`，`size` 以像素为单位；这里刻意不因 `active` 改变
 // 形状或粗细——外壳自己负责选中态的背景，图标保持同一套视觉。
+// 渲染计数：只有真正被外壳调用过，才说明「按 id 配对成功、fallback 齿轮没上场」。
+// host 侧通过 /capabilities 的 clientUi.navIconRenders 读它——设置面板打开过一次
+// 之后，这个数字恒 >= 1 且 `navFallback` 为 0，就是「一颗图标」的现场证据。
+let dsmNavIconRenders = 0
+
 function ArchiveBoxIcon({ size = 16 }) {
+  dsmNavIconRenders++
   return (
     <svg
       width={size} height={size} viewBox="0 0 24 24" fill="none"
@@ -2639,14 +2643,14 @@ const SIDEBAR_AUG_CSS = `
 .dsm-body{display:flex;flex-direction:column;gap:4px;max-height:280px;overflow:auto}
 .dsm-loading,.dsm-empty{font-size:12px;color:var(--dsw-alias-label-tertiary);padding:4px 2px}
 .dsm-err{font-size:12px;color:var(--dsw-alias-state-error-primary);padding:4px 2px}
-.dsm-opt{appearance:none;display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:9px 11px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);border-radius:9px;font-size:12.5px;cursor:pointer;text-align:left}
+.dsm-opt{appearance:none;display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:9px 11px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);border-radius:9px;font-size:12.5px;cursor:pointer;text-align:left}
 .dsm-opt:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-border-l4)}
 .dsm-opt:disabled{opacity:.55;cursor:default}
 .dsm-opt-cur{border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 45%,transparent);color:var(--dsw-alias-state-business-primary)}
 .dsm-opt-name{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
 .dsm-opt-sub{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;flex:none;margin-left:8px}
 .dsm-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:2px}
-.dsm-btn{appearance:none;min-height:32px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-secondary);border-radius:9px;font-size:12px;font-weight:500;cursor:pointer}
+.dsm-btn{appearance:none;min-height:32px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);border-radius:9px;font-size:12px;font-weight:500;cursor:pointer}
 .dsm-btn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .dsm-del{color:var(--dsw-alias-state-error-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 45%,transparent)}
 .dsm-del:hover{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent);color:var(--dsw-alias-state-error-primary)}
@@ -2665,23 +2669,23 @@ const SIDEBAR_AUG_CSS = `
 .dsm-dot-manual{background:var(--dsw-alias-state-business-primary)}
 .dsm-drag-source{opacity:.48}
 .dsm-drop-target{position:relative;background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 10%,transparent)!important;outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px;border-radius:8px}
-.dsm-drop-target::after{content:'移动到这里';position:absolute;right:8px;top:50%;transform:translateY(-50%);padding:1px 6px;border-radius:4px;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-inverted);font-size:10px;font-weight:600;line-height:16px;pointer-events:none}
+.dsm-drop-target::after{content:'移动到这里';position:absolute;right:8px;top:50%;transform:translateY(-50%);padding:1px 6px;border-radius:4px;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-foreground);font-size:10px;font-weight:600;line-height:16px;pointer-events:none}
 .dsm-drag-busy{cursor:progress!important}
 .dsm-trash{margin-top:18px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:14px}
 .dsm-trash-h{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
 .dsm-trash-h h3{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary);margin:0}
 .dsm-trash-count{font-size:11px;color:var(--dsw-alias-label-tertiary)}
 .dsm-trash-list{display:flex;flex-direction:column;gap:6px;max-height:260px;overflow:auto}
-.dsm-trash-row{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-fill-elevated)}
+.dsm-trash-row{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-2)}
 .dsm-trash-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--dsw-alias-label-primary)}
 .dsm-trash-date{font-size:11px;color:var(--dsw-alias-label-tertiary);flex:none;white-space:nowrap}
 .dsm-trash-actions{display:flex;gap:6px;flex:none}.dsm-trash-actions .archv-btn{min-width:72px}
 .dsm-trash-empty{font-size:12px;color:var(--dsw-alias-label-tertiary);padding:6px 2px}
 .dsm-storage-sum{font-size:12px;color:var(--dsw-alias-label-secondary);margin-bottom:10px}
 .dsm-storage-list{display:flex;flex-direction:column;gap:6px}
-.dsm-storage-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-fill-elevated)}
+.dsm-storage-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-2)}
 .dsm-storage-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--dsw-alias-label-primary)}
-.dsm-storage-bar{flex:0 0 96px;height:6px;border-radius:999px;background:var(--dsw-alias-fill-subtle);overflow:hidden}
+.dsm-storage-bar{flex:0 0 96px;height:6px;border-radius:999px;background:var(--dsw-alias-bg-layer-1);overflow:hidden}
 .dsm-storage-fill{display:block;height:100%;border-radius:999px;background:var(--dsw-alias-state-business-primary)}
 .dsm-storage-size{font-size:12px;color:var(--dsw-alias-label-secondary);flex:none;white-space:nowrap}
 .dsm-storage-count{font-size:11px;color:var(--dsw-alias-label-tertiary);flex:none;white-space:nowrap;max-width:32%;overflow:hidden;text-overflow:ellipsis}
@@ -2710,17 +2714,17 @@ const SIDEBAR_AUG_CSS = `
 .dsm-sub-row:hover .dsm-sub-name{color:var(--dsw-alias-label-primary)}
 .dsm-sub-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsm-sub-meta{flex:none;font-size:10.5px;opacity:.8}
-.dsm-sub-live .dsm-sub-meta{color:var(--dsw-alias-state-warning-primary);opacity:1;font-weight:600}
+.dsm-sub-live .dsm-sub-meta{color:var(--dsw-alias-state-warn-primary);opacity:1;font-weight:600}
 .dsm-sub-acts{display:none;align-items:center;gap:4px;flex:none}
 .dsm-sub-row:hover .dsm-sub-acts,.dsm-sub-row:focus-within .dsm-sub-acts{display:inline-flex}
-.dsm-sub-btn{appearance:none;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-secondary);border-radius:6px;padding:1px 6px;font:inherit;font-size:10.5px;line-height:16px;cursor:pointer}
+.dsm-sub-btn{appearance:none;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);border-radius:6px;padding:1px 6px;font:inherit;font-size:10.5px;line-height:16px;cursor:pointer}
 .dsm-sub-btn:hover{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l3)}
 .dsm-sub-btn-danger{color:var(--dsw-alias-state-error-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 40%,transparent)}
 .dsm-sub-note{font-size:11px;color:var(--dsw-alias-label-tertiary);padding:2px 0}
 .dsm-kids-badge:hover{background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 18%,transparent)}
 .dsm-row-sub{transform:translateX(calc(10px + var(--dsm-indent,0px)));transition:transform .15s ease}
 .dsm-row-sub::before{content:'';position:absolute;left:calc(-6px - var(--dsm-indent,0px));top:0;bottom:0;width:2px;border-radius:1px;background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 30%,transparent);pointer-events:none}
-.dsm-tag{display:inline-flex;align-items:center;margin-left:auto;padding:1px 7px;border-radius:999px;background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-tertiary);font-size:10px;font-weight:500;line-height:15px;flex:none;pointer-events:auto;border:none;cursor:default}
+.dsm-tag{display:inline-flex;align-items:center;margin-left:auto;padding:1px 7px;border-radius:999px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-tertiary);font-size:10px;font-weight:500;line-height:15px;flex:none;pointer-events:auto;border:none;cursor:default}
 .dsm-tag-fork{cursor:pointer;background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 12%,transparent);color:var(--dsw-alias-state-success-primary);font-weight:600}
 .dsm-tag-fork:hover{background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 20%,transparent)}
 .dsm-row-flash{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px;border-radius:8px;transition:outline-color .6s ease}
@@ -2815,8 +2819,40 @@ function dsmOnNotice(fn) { dsmNoticeHooks.add(fn); return () => dsmNoticeHooks.d
 // 'dom'（旧版 DOM 注入）/ null（尚未判定）。随能力探测一并上报给 host，
 // 用户报「菜单三项不见了」时不必打开 devtools 就能定位走的是哪条路。
 let dsmMenuMode = null
+// 界面自证：只统计计数与令牌解析值，不采集任何标题/正文。渲染层的问题（右图标
+// 变两颗、行没渲染、令牌失效）只有这里看得见，host 侧无法反推；排障时一次
+// `/archived-sessions/capabilities` 就能拿到现场，不必打开 devtools。
+function dsmCollectUiProbe() {
+  try {
+    if (typeof document === 'undefined') return null
+    const count = (sel) => { try { return document.querySelectorAll(sel).length } catch (e) { return 0 } }
+    const navRow = document.querySelector('[data-dsh-nav-sessions]')
+    const navOwn = navRow ? navRow.querySelectorAll('svg[data-dsm-nav-icon]').length : 0
+    const navIcons = navRow ? navRow.querySelectorAll('svg').length : 0
+    const css = getComputedStyle(document.body || document.documentElement)
+    const token = (name) => String(css.getPropertyValue(name) || '').trim().slice(0, 40)
+    return {
+      navSection: navRow ? 1 : 0,
+      navIcons,
+      navOwn,
+      navFallback: Math.max(0, navIcons - navOwn),
+      navIconRenders: dsmNavIconRenders,
+      sessionRows: count('[role="treeitem"][data-row-key^="session:"]'),
+      workspaceRows: count('[role="treeitem"][data-row-key^="workspace:"]'),
+      overflowRows: count('[data-row-key^="overflow:"]'),
+      stateDots: count('[data-row-key^="session:"] [data-state]'),
+      tokenBgLayer2: token('--dsw-alias-bg-layer-2'),
+      tokenWarn: token('--dsw-alias-state-warn-primary'),
+    }
+  } catch (e) { return null }
+}
 async function dsmLoadCapabilities() {
-  try { dsmCapabilities = await postJSON('/archived-sessions/capabilities', { menuMode: dsmMenuMode || 'pending' }) } catch (e) { /* unknown stays safely unavailable */ }
+  try {
+    const body = { menuMode: dsmMenuMode || 'pending' }
+    const probe = dsmCollectUiProbe()
+    if (probe) body.uiProbe = probe
+    dsmCapabilities = await postJSON('/archived-sessions/capabilities', body)
+  } catch (e) { /* unknown stays safely unavailable */ }
   return dsmCapabilities
 }
 function dsmReportMenuMode(mode) {
@@ -3191,24 +3227,49 @@ function installSidebarSessionMenuAug(ctx) {
   const contextMenuSvc = () => {
     try { return ctx && typeof ctx.get === 'function' ? ctx.get('contextMenus') : null } catch (e) { return null }
   }
-  // 移动会话的子菜单要工作区清单。每开一次菜单发两个请求太贵，缓存 15s。
+  // 移动会话的子菜单要工作区清单。0.2.2-rc.3 的 registry 给每条贡献的 resolve 定了
+  // 预算（Config.resolutionTimeoutMs 默认 1000ms）：超时按失败处理，菜单项会直接
+  // 消失并弹一条失败提示。所以 resolve 一律**同步**只读缓存，绝不在里面等网络：
+  // 缓存空就返回一个 disabled 项，同时在后台预热，下次打开菜单即可用。
   let menuSnapshot = { at: 0, workspaces: [], sessionPath: new Map() }
-  const loadMenuSnapshot = async () => {
-    if (Date.now() - menuSnapshot.at < 15000) return menuSnapshot
-    const [ws, sess] = await Promise.all([
-      postJSON('/archived-sessions/workspaces', {}),
-      postJSON('/archived-sessions/sessions', {}),
-    ])
-    const sessionPath = new Map()
-    for (const item of (sess && sess.items) || []) {
-      if (item && item.sessionId != null && typeof item.workspacePath === 'string') {
-        sessionPath.set(String(item.sessionId), item.workspacePath)
+  let menuSnapshotLoading = null
+  const MENU_SNAPSHOT_TTL = 30000
+  const refreshMenuSnapshot = () => {
+    if (menuSnapshotLoading) return menuSnapshotLoading
+    menuSnapshotLoading = (async () => {
+      try {
+        const [ws, sess] = await Promise.all([
+          postJSON('/archived-sessions/workspaces', {}),
+          postJSON('/archived-sessions/sessions', {}),
+        ])
+        const sessionPath = new Map()
+        for (const item of (sess && sess.items) || []) {
+          if (item && item.sessionId != null && typeof item.workspacePath === 'string') {
+            sessionPath.set(String(item.sessionId), item.workspacePath)
+          }
+        }
+        menuSnapshot = { at: Date.now(), workspaces: (ws && ws.items) || [], sessionPath }
+      } catch (e) {
+        // 保留上一份快照：宁可列稍旧的工作区，也不要让「移动会话」整项消失。
+      } finally {
+        menuSnapshotLoading = null
       }
-    }
-    menuSnapshot = { at: Date.now(), workspaces: (ws && ws.items) || [], sessionPath }
-    return menuSnapshot
+      return menuSnapshot
+    })()
+    return menuSnapshotLoading
   }
+  const warmMenuSnapshot = () => {
+    if (menuSnapshotLoading) return
+    if (Date.now() - menuSnapshot.at < MENU_SNAPSHOT_TTL) return
+    refreshMenuSnapshot().catch(() => {})
+  }
+  // 0.2.2-rc.3 的 registry 对同 (target, id) 的重复注册**直接抛错**，所以本函数
+  // 只能成功进入一次：一次性置位把这个入口变成幂等的（install 自身还有
+  // sidebarMenuAugInstalled 兜底，插件卸载时 ctx.effect 会跑注销函数）。
+  let dataMenusRegistered = false
   const registerDataMenus = (svc) => {
+    if (dataMenusRegistered) return
+    dataMenusRegistered = true
     // 官方会话项 order：pin 100 / rename 200 / fork 300 / 复制 ID 450 / 归档 600
     // （归档带 afterContent，渲染在同级 footer）。标记未读排最前；移动与删除
     // 同样走 afterContent，按「归档 → 移动 → 删除」的危险度递增顺序排在后面。
@@ -3230,7 +3291,8 @@ function installSidebarSessionMenuAug(ctx) {
       id: 'dsm.move-session',
       target: 'session',
       order: 700,
-      resolve: async ({ sessionId }) => {
+      // 同步 resolve（不返回 Promise）：rc.3 对异步 resolve 有 1s 预算，超时算失败。
+      resolve: ({ sessionId }) => {
         const id = String(sessionId)
         const disabled = (reason) => [{
           id: 'move',
@@ -3241,9 +3303,11 @@ function installSidebarSessionMenuAug(ctx) {
         }]
         const cap = dsmActionCapability('relocateSession') || dsmActionCapability('move')
         if (!cap || !cap.available) return disabled(cap && cap.reason)
-        let snap = null
-        try { snap = await loadMenuSnapshot() } catch (e) { snap = null }
-        if (!snap || !snap.workspaces.length) return disabled()
+        const snap = menuSnapshot
+        // 快照还没就绪：同步返回 disabled，后台去拿；下一次打开菜单就是完整子菜单。
+        if (!snap.workspaces.length) { warmMenuSnapshot(); return disabled() }
+        // 过期但非空：先用手上这份（工作区很少变），后台刷新供下一次使用。
+        if (Date.now() - snap.at >= MENU_SNAPSHOT_TTL) warmMenuSnapshot()
         const curPath = snap.sessionPath.get(id) || null
         return [{
           id: 'move',
@@ -3259,6 +3323,9 @@ function installSidebarSessionMenuAug(ctx) {
               failureLabel: '移动失败',
               run: async () => {
                 const r = await postActiveAware('/archived-sessions/move', { sessionId: id, targetPath: w.path })
+                // 移动成功后会话归属变了：让下一次打开菜单重新取快照，否则「（当前）」
+                // 仍标在旧工作区上。
+                menuSnapshot = { ...menuSnapshot, at: 0 }
                 // 会话被 DSH 打开时服务端只登记排队：磁盘与工作区分组都没动，
                 // 绝不能报「已移动」（issue #18 的教训位）。
                 if (r && r.queued) {
@@ -3289,6 +3356,8 @@ function installSidebarSessionMenuAug(ctx) {
     const svc = contextMenuSvc()
     if (!svc || typeof svc.register !== 'function' || typeof ctx.effect !== 'function') return false
     try { registerDataMenus(svc) } catch (e) { return false }
+    // 预热门控：第一次打开 ⋯ 菜单就能直接拿到工作区子菜单，不必等一次往返。
+    warmMenuSnapshot()
     dsmReportMenuMode('contextMenus')
     return true
   }
@@ -4620,6 +4689,13 @@ export function apply(ctx) {
   // 与注入节点一并摘干净（数据菜单那条路自带 ctx.effect，不需要额外清理）。
   const disposeMenuAug = installSidebarSessionMenuAug(ctx)
   if (disposeMenuAug) ctx.effect(() => disposeMenuAug)
+  // 首拍（apply 当刻）DOM 还没渲染，界面自证只能是空的。这里在两次「已经能看见
+  // 侧栏」的时点重报一次，host 侧 /capabilities 才能反映真实渲染结果。
+  for (const delay of [2500, 9000]) {
+    const timer = setTimeout(() => { dsmLoadCapabilities().catch(() => {}) }, delay)
+    if (typeof timer.unref === 'function') timer.unref()
+    ctx.effect(() => () => clearTimeout(timer))
+  }
   // 侧栏增强的卸载清退挂到 cordis effect：插件停用/HMR 时 interval、
   // MutationObserver 与全部注入 DOM 一并回收（否则泄漏到页面关闭）。
   const disposeSidebarDots = installSidebarStatusDots()
