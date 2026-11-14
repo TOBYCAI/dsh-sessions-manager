@@ -543,8 +543,9 @@ export function collapsedVisibleTotal(groupCount, trashInGroup) {
 
 // 本组已渲染的可见会话行数。`rows` 是直接子节点里会话行的描述
 // （{ id, pluginHidden }），`visibleIds` 是「上游会列出且插件不会藏」的 id 集合。
-// 插件隐藏的行（回收站 / 空白）与不在集合里的行（空白会话 / 上游过滤口径差异）
-// 都不计入 —— 与 `remainingRows` 的「可见总数」保持同一口径。
+// 插件隐藏的行（回收站 / 墓碑 / 空白）与不在集合里的行（空白会话 / 上游过滤
+// 口径差异）都不计入 —— 与 `remainingRows` 的「可见总数」保持同一口径。
+// 3.8.1 起空白行的例外只有「当前会话」：它不藏也不扣（见 paint 里的说明）。
 export function countRenderedVisible(rows, visibleIds) {
   if (!Array.isArray(rows) || !visibleIds || typeof visibleIds.has !== 'function') return 0
   let n = 0
@@ -557,8 +558,8 @@ export function countRenderedVisible(rows, visibleIds) {
 
 // 空分组判定：`group.sessions` 里「还会出现在侧栏」的条数。
 // - 空白会话不计：上游 `watermarkRows` 里 `if (session.blank) return true`，
-//   空白行永远保留、从不计入可展开数；插件也一律把它藏起来。
-// - `hiddenIds` = 回收站 / 墓碑 / 空白血缘的行 id（与展开计数同一份口径）。
+//   空白行从不计入可展开数；插件这层同样藏掉空白行（当前会话除外，见 paint）。
+// - `hiddenIds` = 回收站 / 墓碑 / 被插件藏起来的空白行 id（与展开计数同一口径）。
 // - 返回 null 表示**不知道**（拿不到数据层，或该组还没加载出会话）：调用方
 //   必须按「非空」处理——宁可留一个空标题，也不能把仍有会话的组藏掉。
 export function aliveSessionCount(sessions, hiddenIds) {
@@ -582,8 +583,8 @@ export function aliveSessionCount(sessions, hiddenIds) {
 // （`containsCurrent: g.key === currentGroup`，0.1.5 起各代都在），表示当前会话
 // 是否就住在这个分组里。
 // - 当前会话在本组 → 绝不藏。藏掉它等于同时藏掉用户此刻的位置与「+ 新建对话」
-//   入口；而上游只渲染「当前会话」那一条 blank 行、插件又把 blank 行一律隐藏，
-//   于是组内可见数为 0，正好撞上 aliveCount === 0 的隐藏条件——整组消失即由此而来。
+//   入口；3.8.1 起连当前会话那一条 blank 行也不再被插件隐藏（与上游同口径），
+//   但 `aliveCount` 依旧按「非 blank」统计，所以这层否决必须保留。
 // - `aliveCount` 沿用 aliveSessionCount 的三态纪律：null=不知道 → 不藏。
 export function shouldHideEmptyGroup(aliveCount, containsCurrent) {
   if (containsCurrent === true) return false

@@ -30,6 +30,7 @@ import { detectCapabilities, requireCapability } from './compat/capabilities.js'
 import { pathOwnsSession } from './path-guard.js'
 import { purgeSessionArtifacts, moveSessionToCwd } from './handle-era-ops.js'
 import { classifyLineage, emptyScanCandidate, isEmptyEventTypes, subagentDescendantsOf, EMPTY_DECODE_LIMIT } from './lineage.js'
+import { cachedTitleOf, readCachedHints } from './projection-hints.js'
 
 // 构建指纹：build.mjs 以 define 在编译期注入；直接以源码运行（测试）时为 'dev'。
 // 用途：capabilities 带出 buildStamp，一眼判断「运行中的 host 是不是这份构建」——
@@ -274,6 +275,32 @@ export function apply(ctx) {
       const title = snap && snap.values ? snap.values.title : null
       return typeof title === 'string' && title.length > 0 ? title : null
     } catch (e) { return null }
+  }
+
+  // —— 0.2.2+ 官方持久投影缓存（3.8.1 底座换轨）——————————————————————————
+  // 上面的 projectionTitleOf 只覆盖**已实例化**的 live 会话；历史会话（冷会话）
+  // 以前只能等 readTitleSnapshots 把整本日志解码（issue #8）。0.2.2-rc.3 默认
+  // 挂载的 sessionProjectionCache 补上了这一层：cachedSnapshot(header, keys)
+  // 只读 header、零 I/O，冷会话也能直接拿到标题与 sessionListMetadata.blank。
+  //
+  // 红线：
+  //   1. 服务不存在（0.1.7 / 0.2.0 早期）→ null，行为与 3.8.0 完全一致；
+  //   2. 只当提示用（缓存可能过期但永不超前），title 为空仍是「未知」→ 交预热；
+  //   3. blank 只做单向预筛（见 projection-hints.js 的说明）。
+  function cachedHintsOf(header) {
+    if (!header || typeof header !== 'object') return null
+    try { return readCachedHints(ctx.get('sessionProjectionCache'), ctx.get('sessionProjections'), header) } catch (e) { return null }
+  }
+
+  function cachedTitleOfHeader(header) {
+    try { return cachedTitleOf(ctx.get('sessionProjectionCache'), ctx.get('sessionProjections'), header) } catch (e) { return null }
+  }
+
+  // 持久缓存只服务**冷会话**：live 会话的标题以注册表投影为准（上游也这么分：
+  // api-session-controller 的 projectionsFor 对 live 走 snapshot、对 header 才走
+  // cache）。否则刚改名、cell 还没折叠的那一瞬间会被上一代缓存顶回旧标题。
+  function isLiveSession(liveStore, id) {
+    try { return !!(liveStore && typeof liveStore.get === 'function' && liveStore.get(id)) } catch (e) { return false }
   }
 
   async function archivedState() {
@@ -1635,10 +1662,35 @@ export function apply(ctx) {
       (usage.statsById && usage.statsById.get(id)) || { mtimeMs: usage.mtimeById.get(id), size: usage.sizeById.get(id) },
     ]))
     const { cached, missing } = metaCache.partition(visibleIds, statsById)
-    // P4：missing 里先查持久标题索引（冷启动跳过整本解码），命中的回填内存缓存。
+    // 命中顺序（3.8.1 换轨后）：零 I/O 的官方投影排在磁盘索引之前。
+    //   ① live 会话：注册表 cachedSnapshot（内存 cell，最新）
+    //   ② 冷会话：官方持久投影缓存 cachedSnapshot / cachedPredecessorTitle
+    //   ③ 本地持久标题索引（磁盘，await——只在①②都没命中时才付这个成本）
+    //   ④ 后台预热（整本解码，只兜最后一批）
+    // ①② 都是同步的，且命中即从「需要补齐」里摘掉：大库冷启动不再把每条历史
+    // 会话都推给 readTitleSnapshots（issue #8 的 90s CPU 来源）。
+    const projectionMeta = new Map()
+    const unresolved = []
+    for (const id of missing) {
+      const entry = entryById.get(id)
+      const header = entry && entry.header ? entry.header : null
+      const title = projectionTitleOf(live, id) || (isLiveSession(live, id) ? null : cachedTitleOfHeader(header))
+      // 只信非空字符串：null = 未知（cell 可能还没折叠），继续往下走。
+      if (title == null) { unresolved.push(id); continue }
+      const meta = {
+        title,
+        cwd: (header && typeof header.cwd === 'string' && header.cwd) ? header.cwd : null,
+        createdAt: (header && header.createdAt != null) ? header.createdAt : null,
+      }
+      projectionMeta.set(id, meta)
+      // metaCache.set 在指纹不可算时拒绝写入，所以命中结果另存 projectionMeta，
+      // 本请求的渲染链直接可用——缓存只是增益。
+      metaCache.set(id, statsById.get(id), meta)
+    }
+    // P4：仍缺的再查持久标题索引（冷启动跳过整本解码），命中的回填内存缓存。
     // cwd/createdAt 回填时以最新 list header 为权威——持久条目里的 cwd 可能因
     // 移动会话而陈旧（sz 指纹对 cwd 无感知），标题才是索引的产出物。
-    const persisted = await hydrateFromPersist(missing, statsById)
+    const persisted = await hydrateFromPersist(unresolved, statsById)
     for (const [id, meta] of persisted) {
       const entry = entryById.get(id)
       const header = entry && entry.header ? entry.header : null
@@ -1648,27 +1700,8 @@ export function apply(ctx) {
         createdAt: (header && header.createdAt != null) ? header.createdAt : meta.createdAt,
       })
     }
-    const stillMissing0 = missing.filter((id) => !persisted.has(id))
-    // 0.2.0+ 官方投影快路径：先把「已实例化且 cell 已 materialize」的会话从
-    // 预热队列里捞回来（cachedSnapshot 零 I/O），剩下的才进后台预热。
-    // 注意：metaCache.set 在指纹不可算（无 stat / revision 缺失）时**拒绝写入**，
-    // 所以命中结果另存 projectionMeta，本请求的渲染链直接可用——缓存只是增益。
-    const projectionMeta = new Map()
-    const stillMissing = []
-    for (const id of stillMissing0) {
-      const title = projectionTitleOf(live, id)
-      if (title == null) { stillMissing.push(id); continue }
-      const entry = entryById.get(id)
-      const header = entry && entry.header ? entry.header : null
-      const meta = {
-        title,
-        cwd: (header && typeof header.cwd === 'string' && header.cwd) ? header.cwd : null,
-        createdAt: (header && header.createdAt != null) ? header.createdAt : null,
-      }
-      projectionMeta.set(id, meta)
-      metaCache.set(id, statsById.get(id), meta)
-    }
-    // issue #8：缺失部分交后台预热（分批 + 让步），请求路径零投影、零日志解码。
+    const stillMissing = unresolved.filter((id) => !persisted.has(id))
+    // issue #8：仍然缺的才进后台预热（分批 + 让步），请求路径零投影、零日志解码。
     if (stillMissing.length) enqueueWarm(stillMissing, statsById, entryById)
     const items = []
     for (const id of visibleIds) {
@@ -1801,6 +1834,14 @@ export function apply(ctx) {
     // 墓碑只对「当前不存在」的 id 继续输出；同 id 会话重新出现时必须让位。
     const present = new Set(ids)
     const activeTombstones = store.purgedSessionIds.map(String).filter((id) => !present.has(id))
+    // 官方持久投影缓存的冷提示（同步、零 I/O）。标题与 blank 共用同一次读取——
+    // 每条会话只查一次表，别在下面的血缘循环里再查一遍。
+    // 必须声明在 if 之外：血缘循环对所有 entries 都要读它。
+    const hintsById = new Map()
+    for (const entry of entries) {
+      const hints = cachedHintsOf(entry.header)
+      if (hints) hintsById.set(String(entry.id), hints)
+    }
     if (ids.length) {
       const usage = await collectUsage(entries)
       const entryById = new Map(entries.map((entry) => [entry.id, entry]))
@@ -1809,8 +1850,26 @@ export function apply(ctx) {
         (usage.statsById && usage.statsById.get(id)) || { mtimeMs: usage.mtimeById.get(id), size: usage.sizeById.get(id) },
       ]))
       const { cached, missing } = metaCache.partition(ids, statsById)
+      // 命中顺序与 /sessions 一致：live 注册表 → 官方持久投影缓存 → 本地索引 → 预热。
+      const projectionMeta = new Map()
+      const unresolved = []
+      for (const id of missing) {
+        const entry = entryById.get(id)
+        const header = entry && entry.header ? entry.header : null
+        const hints = hintsById.get(id) || null
+        const title = projectionTitleOf(sessions, id)
+          || (isLiveSession(sessions, id) ? null : (hints && hints.title ? hints.title : null))
+        if (title == null) { unresolved.push(id); continue }
+        const meta = {
+          title,
+          cwd: (header && typeof header.cwd === 'string' && header.cwd) ? header.cwd : null,
+          createdAt: (header && header.createdAt != null) ? header.createdAt : null,
+        }
+        projectionMeta.set(id, meta)
+        metaCache.set(id, statsById.get(id), meta)
+      }
       // P4：与列表构建共用持久标题索引，冷启动零解码。
-      const persisted = await hydrateFromPersist(missing, statsById)
+      const persisted = await hydrateFromPersist(unresolved, statsById)
       for (const [id, meta] of persisted) {
         const entry = entryById.get(id)
         const header = entry && entry.header ? entry.header : null
@@ -1820,22 +1879,22 @@ export function apply(ctx) {
           createdAt: (header && header.createdAt != null) ? header.createdAt : meta.createdAt,
         })
       }
-      const rest = missing.filter((id) => !persisted.has(id))
+      const rest = unresolved.filter((id) => !persisted.has(id))
       // issue #8：缺失标题不在请求路径上同步投影（runtime 投影 = 逐条整本解码），
       // 交后台预热补齐；侧栏高频轮询会让补齐结果自然浮现。
       if (rest.length) enqueueWarm(rest, statsById, entryById)
       for (const id of ids) {
-        const meta = metaCache.get(id, statsById.get(id)) || persisted.get(id) || null
+        const meta = metaCache.get(id, statsById.get(id)) || persisted.get(id) || projectionMeta.get(id) || null
         if (meta && meta.title) authorityTitleCache.set(id, String(meta.title))
       }
     }
-    // 血缘分类（issue #6 + T1/3.7.0）：结构分类（子代理 / fork 分支）来自 list
-    // snapshot 的 header，零解码。空白（empty）是**三态**：null=未知（等后台
-    // refine 队列精判）、true/false=已判定（来自进程内缓存或 empty-scan 持久层，
-    // sz 指纹一致 + 14 天 TTL 内才可信）。请求路径零解码承诺由此完整成立：
-    // 超过解码上限的日志「必有内容」按事实直接给 false；legacy 无 sizeBytes
-    // 观测 → 永不候选、恒未知（与旧行为一致）。普通会话只在真判空时建条目，
-    // 「误隐藏」在结构上不可能来自体积法（该路径已整体退役）。
+    // 血缘分类（issue #6 + T1/3.7.0 + 3.8.1）：结构分类（子代理 / fork 分支）来自
+    // list snapshot 的 header，零解码。空白（empty）是**三态**：null=未知（等后台
+    // refine 队列精判）、true/false=已判定（来自进程内缓存、empty-scan 持久层
+    // ——sz 指纹一致 + 14 天 TTL 内才可信——或官方投影的 blank 预筛）。
+    // 请求路径零解码承诺由此成立：超过解码上限的日志「必有内容」按事实直接给 false；
+    // legacy 无 sizeBytes 观测 → 永不候选、恒未知（与旧行为一致）。普通会话只在
+    // 真判空时建条目，「误隐藏」在结构上不可能来自体积法（该路径已整体退役）。
     const lineage = {}
     const refineWanted = []
     let emptyStore = null
@@ -1844,9 +1903,14 @@ export function apply(ctx) {
     for (const entry of entries) {
       const id = String(entry.id)
       const size = entry && Number.isFinite(entry.sizeBytes) ? entry.sizeBytes : null
+      const hints = hintsById.get(id) || null
       const candidate = emptyScanCandidate(size)
       let verdict = null
-      if (!candidate) {
+      // 单向预筛：官方投影确认过 turn/start ⇒ 必有内容，这一次解码可以省掉。
+      // 反方向不成立（blank===true 仍要事件精判），理由见 projection-hints.js。
+      if (hints && hints.blank === false) {
+        verdict = false
+      } else if (!candidate) {
         if (size !== null) verdict = false // 超出解码上限 = 必有内容（事实，不是猜测）
       } else {
         const mem = emptyScanCache.get(id)

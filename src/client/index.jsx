@@ -2818,8 +2818,10 @@ function dsmNotify(text, kind) {
   if (!done) { try { console.warn('[dsh-sessions-manager] ' + text) } catch (e) {} }
 }
 function dsmOnNotice(fn) { dsmNoticeHooks.add(fn); return () => dsmNoticeHooks.delete(fn) }
-// 空白会话一律隐藏（原「纯净视图」的默认行为固化为唯一行为，开关已于
-// 0.1.3 移除：上游本就不把空白会话渲染进侧栏，开关没有可服务的场景）。
+// 空白会话的侧栏显隐（3.8.1）：上游 sessionVisible() 只过滤「已知 blank 且非当前」
+// 的行；而服务端对没有投影缓存记录的冷会话按 `blank ?? false` 处理（未知 ⇒ 非空），
+// 这类行仍会被渲染出来。所以插件这层规则保留，只把「当前会话」排除在外——
+// 那是用户刚点「新建」的那一条，藏掉它等于把当前对话从侧栏抹掉（issue #21）。
 // 只隐藏，永不删除；子代理行按 DSH 设计不进侧栏（ui-subagent README 明文
 // "omitted from the ordinary sidebar"），收纳由上游完成，插件侧不做。
 // 会话 ⋯ 菜单实际启用的通道：'contextMenus'（0.2.2+ 官方数据注册）/
@@ -3581,9 +3583,9 @@ function installSidebarStatusDots() {
   // 本组的会话行与展开按钮都是这个容器的子节点。
   //
   // 判定走数据层（与展开计数同一口径）：只有 group.sessions 里「非空白、且
-  // 不在回收站/墓碑/空白集合」的条数确实为 0 才藏。只看 DOM 会把「上游折叠
-  // 后还没渲染出来的可见会话」误判成空组，连标题带展开按钮一起藏掉——那些
-  // 会话就再也点不到了。
+  // 不在回收站/墓碑/被插件藏起来的空白行」的条数确实为 0 才藏。只看 DOM 会把
+  // 「上游折叠后还没渲染出来的可见会话」误判成空组，连标题带展开按钮一起藏掉
+  // ——那些会话就再也点不到了。
   //
   // 原 display 记在容器的 dataset 上（而不是 WeakMap）：还原路径无法遍历
   // WeakMap，dataset 让「谁被我们藏过、原来是什么」随时可查可还原。
@@ -3665,19 +3667,25 @@ function installSidebarStatusDots() {
     }
     return null
   }
-  function dsmSyncEmptyGroups(purgedNow) {
+  function dsmSyncEmptyGroups(purgedNow, activeId) {
     let rows = null
     try { rows = document.querySelectorAll('[role="treeitem"][data-row-key^="workspace:"]') } catch (e) { return }
     if (!rows || !rows.length) return
     const purged = purgedNow instanceof Set ? purgedNow : new Set()
     // 被插件藏起来的 id 集合只在真的需要判定时建一次（绝大多数帧用不到）。
+    // 3.8.1：空白行里**当前会话那一条不藏**（与上游 sessionVisible 同口径），
+    // 所以它也不能进这份"会被扣掉"的集合——否则活会话数被扣成 0，整组消失。
     let hiddenIds = null
     const hiddenIdSet = () => {
       if (hiddenIds) return hiddenIds
       hiddenIds = new Set()
       if (dsmTrashIds) for (const id of dsmTrashIds) hiddenIds.add(id)
       for (const id of purged) hiddenIds.add(id)
-      for (const [id, info] of dsmLineage.entries()) if (info && info.empty) hiddenIds.add(id)
+      for (const [id, info] of dsmLineage.entries()) {
+        if (!info || !info.empty) continue
+        if (activeId && id === activeId) continue
+        hiddenIds.add(id)
+      }
       return hiddenIds
     }
     rows.forEach((row) => {
@@ -3733,7 +3741,8 @@ function installSidebarStatusDots() {
   // （上游只有这一个展开入口 → 会话不可达）。这里改用
   //   还能出现几行 = 本组可见总数（非 blank、且不会被插件藏）- 已渲染可见行数
   // 空白行两边都排除（F2）：上游 watermarkRows 里 `if (session.blank) return true`
-  // —— 空白行永远保留、从不计入 N。
+  // —— 空白行永远保留、从不计入 N；插件这层同样排除空白行，唯一例外是当前会话
+  // 那一条（3.8.1，与上游 sessionVisible 同口径）。
   //
   // 数据层拿不到 group.sessions 时**什么都不改**（F6）：DOM 兜底在数学上不成立，
   // 写一个看起来合理却会算错的数比不改更糟。
@@ -3755,7 +3764,7 @@ function installSidebarStatusDots() {
     return n + '|' + firstKey + '|' + lastKey + '|' + (btn.textContent || '') + '|' + (btn.style.display || '') +
       '|' + (dsmTrashIds ? dsmTrashIds.size : -1) + '|' + purgedNow.size + '|' + dsmLineage.size
   }
-  function dsmSyncOverflowLabels(purgedNow) {
+  function dsmSyncOverflowLabels(purgedNow, activeId) {
     let buttons = null
     try { buttons = document.querySelectorAll('[data-row-key^="overflow:"]') } catch (e) { return }
     if (!buttons || !buttons.length) return
@@ -3800,6 +3809,9 @@ function installSidebarStatusDots() {
         const groupCount = group && typeof group.sessionCount === 'number' ? group.sessionCount : null
         const collapsed = !nodes.length && groupCount != null && groupCount > 0
         // 本组「上游会列出、且不会被插件藏起来」的会话集合。
+        // 空白行按上游口径排除（watermarkRows 里 `if (session.blank) return true`）；
+        // 另外排除插件自己会藏掉的空白行——当前会话那一条不藏（与上游同口径），
+        // 所以要单独放行，否则本组可见集会算成空、按钮永远不校准。
         const ids = new Set()
         for (const node of (nodes && nodes.length ? nodes : [])) {
           if (!node || node.blank) continue
@@ -3807,7 +3819,7 @@ function installSidebarStatusDots() {
           if (!id) continue
           if ((dsmTrashIds && dsmTrashIds.has(id)) || purgedNow.has(id)) continue
           const li = dsmLineage.get(id)
-          if (li && li.empty) continue
+          if (li && li.empty && id !== activeId) continue
           ids.add(id)
         }
         // 已渲染进 DOM 的可见行：本组会话行里不在隐藏标记中的那些。
@@ -3965,10 +3977,16 @@ function installSidebarStatusDots() {
         return
       }
       // ---- 血缘分层披露（issue #6）--------------------------------------
-      // 优先级：回收站/墓碑隐藏 > 纯净视图隐藏（仅空白行） > 原生显示。
+      // 优先级：回收站/墓碑隐藏 > 空白行隐藏（当前会话除外） > 原生显示。
       // 子代理行按 DSH 设计不进侧栏（ui-subagent README 明文）；万一上游
       // 改回渲染，这里只做缩进视觉、绝不隐藏——侧栏没有展开入口，藏了
       // 就再也找不回来。
+      // 空白行仍要藏，但**当前会话除外**（3.8.1）：上游 sessionVisible() 只过滤
+      // `blank && id !== current`，而服务端对没有投影缓存记录的冷会话按
+      // `blank ?? false` 处理——也就是「不知道」会被当成非空渲染出来。插件这层
+      // 规则覆盖的正是这批会话；把当前会话一起藏掉则是 issue #21「整组消失」
+      // 的另一半（用户刚点「新建」的那条对话看不见）。两边口径对齐后，
+      // 「藏哪些行」与「计数扣哪些行」才是同一份事实。
       const li = dsmLineage.get(id)
       const isSub = !!(li && li.origin === 'subagent')
       const isEmpty = !!(li && li.empty)
@@ -3986,8 +4004,7 @@ function installSidebarStatusDots() {
         if (getComputedStyle(row).position === 'static') row.style.position = 'relative'
         const depth = Math.max(0, (li.delegationDepth || 1) - 1)
         if (depth > 0) row.style.setProperty('--dsm-indent', String(depth * 10) + 'px')
-      } else if (li && isEmpty) {
-        // 空白行一律隐藏（原纯净视图行为固化，见 dsmLineage 注释）。
+      } else if (li && isEmpty && id !== activeId) {
         hideLineage = true
       }
       if (hideLineage) {
@@ -3998,8 +4015,8 @@ function installSidebarStatusDots() {
         return
       }
       if (row.style.display === 'none') row.style.display = ''
-      // 行重新可见（已从回收站恢复 / 空白状态消失）：摘掉隐藏标记，展开计数
-      // 立刻把这一条还回「可展开」的数量里。
+      // 行重新可见（已从回收站恢复 / 空白状态消失 / 成为当前会话）：摘掉隐藏
+      // 标记，展开计数立刻把这一条还回「可展开」的数量里。
       if (row.hasAttribute(DSM_HIDDEN_ATTR)) row.removeAttribute(DSM_HIDDEN_ATTR)
       if (!isEmpty && li && li.parentSession && li.origin !== 'subagent') {
         // fork 分支行：绿「⑂ 分支」chip，点击滚动并高亮父会话行。
@@ -4140,9 +4157,9 @@ function installSidebarStatusDots() {
         if (sd && sd.style.display === 'none') sd.style.display = ''
       }
     })
-    dsmSyncEmptyGroups(purgedNow)
+    dsmSyncEmptyGroups(purgedNow, activeId)
     // issue #16：等隐藏标记落定后再校准展开计数（数据层优先，DOM 标记兜底）。
-    dsmSyncOverflowLabels(purgedNow)
+    dsmSyncOverflowLabels(purgedNow, activeId)
   }
   dsmRepaintDots = paint
   const paintToast = (msg, kind) => {

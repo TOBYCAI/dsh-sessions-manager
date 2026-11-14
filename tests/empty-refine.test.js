@@ -20,7 +20,7 @@ async function waitFor(cond, msg, limit = 200) {
   assert.fail(msg || 'condition not met')
 }
 
-function makeCtx(routes, opens, { era = 'handle' } = {}) {
+function makeCtx(routes, opens, { era = 'handle', withCache = false } = {}) {
   const root = process.env.DSM_TEST_ROOT
   const mk = (id, extra = {}, sizeBytes = 900) => ({
     header: { id, cwd: root, createdAt: 1, isSeeded: false, delegationDepth: 0, ...extra },
@@ -31,6 +31,8 @@ function makeCtx(routes, opens, { era = 'handle' } = {}) {
     mk('sub-9', { origin: 'subagent', parentSession: 'p9', delegationDepth: 1 }),
     mk('empty-9', {}, 150),
     mk('p9'),
+    // 3.8.1：官方投影已判「有过 turn/start」（blank === false）的会话。
+    ...(withCache ? [mk('has-content-9', {}, 900)] : []),
   ]
   const sessionPersistence = era === 'handle'
     ? {
@@ -54,7 +56,20 @@ function makeCtx(routes, opens, { era = 'handle' } = {}) {
     sessionQuery: { readTitleSnapshots: async () => [], readTitleSnapshot: async () => null },
     storageDomain: { get: () => ({ global: { get: () => ({ archivedSessionIds: [] }), set: async () => {} } }) },
     webServer: { register: (r) => { routes.set(r.path, r.handler); return () => {} } },
-    get: () => null,
+    get: (name) => {
+      if (name !== 'sessionProjectionCache' || !withCache) return null
+      return {
+        // has-content-9：官方投影已确认出现过 turn/start ⇒ 必有内容。
+        // empty-9：官方判 blank（还没走到 turn/start），但我们的口径更严，仍要精判。
+        cachedSnapshot: (header) => {
+          const id = header && header.id
+          if (id === 'has-content-9') return { asOfSeq: 12, values: { title: '有内容', sessionListMetadata: { blank: false, lastPromptAt: 9 } } }
+          if (id === 'empty-9') return { asOfSeq: 3, values: { sessionListMetadata: { blank: true, lastPromptAt: null } } }
+          return undefined
+        },
+        cachedPredecessorTitle: () => undefined,
+      }
+    },
     effect: (fn) => fn(),
   }
 }
@@ -110,4 +125,37 @@ test('legacy era never claims refine work (no sizeBytes observation)', async () 
   assert.equal(r.body.lineage['sub-9'].empty, null, 'structural rows still publish, empty stays unknown')
   await sleep(60)
   assert.deepEqual(opens, [], 'legacy must never decode (candidate gate)')
+})
+
+// —— 3.8.1 底座换轨：官方 blank 只做单向预筛 ————————————————————————
+// blank === false（官方已看到 turn/start）⇒ 必有内容 ⇒ 连那一次精判解码都省掉；
+// blank === true 绝不能直接当空白（官方口径比我们粗：只有 user/message 被打断的
+// 会话官方判空、我们判非空），必须照旧走事件精判。
+test('official blank === false skips the decode; blank === true still refines', async () => {
+  root = await mkdtemp(join(tmpdir(), 'dsm-er-blank-'))
+  process.env.DSH_SESSIONS_MANAGER_TRASH_DIR = join(root, 'trash')
+  process.env.DSH_SESSIONS_MANAGER_STAR_DIR = join(root, 'state')
+  process.env.DSH_SESSIONS_MANAGER_PENDING_DIR = join(root, 'pending')
+  process.env.DSM_TEST_ROOT = root
+  const routes = new Map()
+  const opens = []
+  const { apply } = await import(`../src/index.js?er-blank=${Date.now()}`)
+  apply(makeCtx(routes, opens, { withCache: true }))
+
+  const first = await callOn(routes, '/archived-sessions/sidebar-state')
+  // 普通会话只有真判空才建 lineage 条目 ⇒ blank=false 的会话**不出现**即为非空；
+  // blank=true 若被直接当空白，这里就会出现 { empty: true }。
+  assert.equal(first.body.lineage['has-content-9'], undefined, 'blank=false 不该产生空白条目')
+  assert.equal(first.body.lineage['empty-9'], undefined, 'blank=true 只是提示，不能直接宣告空白')
+
+  await waitFor(
+    async () => !(await callOn(routes, '/archived-sessions/sidebar-state')).body.refinePending,
+    'refine never converged',
+    400,
+  )
+  const settled = await callOn(routes, '/archived-sessions/sidebar-state')
+  assert.equal(settled.body.lineage['empty-9'].empty, true, 'blank=true 的候选仍要被精判为空白')
+  assert.ok(!opens.includes('has-content-9'), `blank=false 的会话不该被解码，实际 ${JSON.stringify(opens)}`)
+  assert.ok(opens.includes('empty-9'), 'blank=true 的候选必须走精判')
+  await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 })
 })
