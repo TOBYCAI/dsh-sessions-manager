@@ -119,7 +119,7 @@ The "Grouping" dropdown has two options:
 A few rules worth knowing while you're in lineage view:
 
 - Branch groups are ordered by creation time, oldest first, and the source row stays where it was.
-- When the parent is filtered out, archived or deleted, the group header degrades to "来源：<short id>" and no row is lost. So a "来源：" header showing up in the Active view is expected, not a bug.
+- When the parent is filtered out, archived or deleted, the group header degrades to `来源：<short id>` and no row is lost. So a "来源：" header showing up in the Active view is expected, not a bug.
 - Subagents don't take top-level rows: they're left out of the All / Active / Archived / Empty counts and out of select-all.
 - Subagents whose parent isn't in the current list collect into a "未归属的子代理会话" card at the end, collapsed by default and auto-expanded by a search hit. The list never fills up with rows of "(untitled)".
 
@@ -196,9 +196,6 @@ The plugin hides empty rows in the sidebar, but **the current session is never h
 
 ## Screenshots
 
-<details>
-<summary>Expand for screenshots (sidebar menu / sidebar subagent folding / settings panel / batch move / empty view / auto-archive / storage usage / starred / recycle bin / session details)</summary>
-
 ![Sidebar ⋯ menu: mark unread, move session, delete session](assets/screenshot-session-submenu.png)
 
 ![Sidebar subagent folding ("▸ N 子代理" badge + in-place expansion) and the "⑂ 分支" branch badge](assets/screenshot-session-subagent.png)
@@ -218,8 +215,6 @@ The plugin hides empty rows in the sidebar, but **the current session is never h
 ![Recycle bin](assets/screenshot-session-trash.png)
 
 ![Session details: disk usage / stats / tool usage](assets/screenshot-session-details.png)
-
-</details>
 
 ## Known limitations
 
@@ -247,8 +242,7 @@ Works on DSH Desktop and `dsh web` with the same host + client, and on macOS / W
 
 Unverified future runtimes get only the safely recognisable subset. The panel's own messages and the `/archived-sessions/capabilities` payload are what count, not whether a method happens to exist.
 
-<details>
-<summary>What's reduced on old runtimes, and where the workarounds sit</summary>
+### What's reduced on old runtimes, and where the workarounds sit
 
 - **Restoring from the bin** first confirms the underlying session still exists (live / `stat` / list, three levels). Gone returns `DSM_SESSION_MISSING`, already purged returns `DSM_SESSION_PURGED`, index present but log vanished returns `DSM_SESSION_LOG_MISSING`; when the location can't be verified it says `unverified` rather than pretending. Restoring into a deleted workspace succeeds and notes that the session is temporarily ungrouped.
 - **Permanent delete / empty bin / automatic purge**: the official contract has no delete API, so this keeps the legacy half-official route: three guarded derivations from the backend instance's storage root (root → session-directory layout → session-id ownership check), then the directory is removed and re-checked with the official `stat`. Sessions with active writes are refused (409). If derivation fails (say the storage root can't be established) the capability is disabled with a reason rather than deleting blind. Sibling generations in the same directory go too, otherwise DSH falls back to an older one and the delete accomplishes nothing.
@@ -257,8 +251,6 @@ Unverified future runtimes get only the safely recognisable subset. The panel's 
 - **Metadata caching**: change detection uses the official snapshot `revision` on newer runtimes (comparable within one process only, never written to a cross-restart cache file) and a `(mtime, size)` fingerprint on older ones. List cwd and creation time come straight from the snapshot header without reading the log; titles aren't read at page load either: a missing title renders blank and arrives from a background queue. A read failure and "this session truly has no title" are kept strictly apart: a failure writes no cache and is retried later (immediately once that log changes), so one transient failure never leaves a session stuck at "(untitled)".
 - **Auto-archive** finds no reliable "last active" signal on newer runtimes, so when idleness can't be proven the check is skipped (`no-activity-data`) instead of guessing.
 - **Sidebar injection** keeps DOM / React-fiber recognition inside a versionable adapter. When the upstream sidebar shape isn't recognised the whole augmentation disables safely and the official sidebar is untouched. When it is recognised, it runs mostly on incremental MutationObserver updates with a low-frequency fallback sweep.
-
-</details>
 
 ## Development
 
@@ -273,8 +265,7 @@ npm test
 
 Always rebuild when you bump the version. The build stamp is a reproducible `vX.Y.Z+source-hash`, which is what makes that diff meaningful.
 
-<details>
-<summary>Source layout</summary>
+### Source layout
 
 ```
 package.json        npm metadata + dsh.bundle.patch + dsh.client (browser-half registration)
@@ -310,10 +301,7 @@ src/client/index.jsx       client entry: settings panel, sidebar augmentation, o
 src/client/logic.js        unit-tested pure logic (folding, counting, filtering, drag step, …)
 ```
 
-</details>
-
-<details>
-<summary>Host routes</summary>
+### Host routes
 
 | Method | Path | Description |
 |---|---|---|
@@ -353,8 +341,6 @@ src/client/logic.js        unit-tested pure logic (folding, counting, filtering,
 | POST | `/archived-sessions/auto-archive/settings` | Read or update the auto-archive policy `{ inactiveDays, skipStarred }`; reading lazily triggers the daily check |
 | POST | `/archived-sessions/auto-archive/run` | Run the auto-archive check once, ignoring the daily throttle |
 | POST | `/archived-sessions/capabilities` | Current persistence generation, read / archive / recycle-bin / purge / cross-workspace-move capabilities, plus two client echoes: `clientMenu: { mode, at }` (menu channel, `contextMenus` or `dom`) and `clientUi: { navSection, navIcons, navOwn, navFallback, navIconRenders, sessionRows, workspaceRows, overflowRows, stateDots, tokenBgLayer2, tokenWarn, at }` (UI self-evidence: counts and resolved token values only, never titles or message bodies) |
-
-</details>
 
 ## License
 

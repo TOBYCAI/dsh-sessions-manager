@@ -119,7 +119,7 @@ fork 出来的会话带绿色「⑂ 分支」标记，悬停能看到来源父�
 血缘视图下有几条规则值得先知道：
 
 - 分支组内按创建时间升序，来源父行留在原位。
-- 父会话被筛掉、归档或删掉时，组头降级成「来源：<短 ID>」，一行都不会丢。所以「活动」视图里出现「来源：」组头是正常的，不是 bug。
+- 父会话被筛掉、归档或删掉时，组头降级成 `来源：<短 ID>`，一行都不会丢。所以「活动」视图里出现「来源：」组头是正常的，不是 bug。
 - 子代理不占顶层行，不计入「全部 / 活动 / 已归档 / 空白」的计数，也不参与全选。
 - 父会话不在当前列表里的子代理，统一收进列表末尾的「未归属的子代理会话」卡片，默认收起，搜索命中会自动展开。不会拿一堆「(无标题)」行把列表铺满。
 
@@ -196,9 +196,6 @@ DSH 给每个会话日志加了单写者锁。会话一旦被打开（哪怕只�
 
 ## 截图
 
-<details>
-<summary>展开查看截图（侧边栏菜单 / 侧栏子代理折叠 / 设置面板 / 批量移动 / 空白视图 / 自动归档 / 存储占用 / 已收藏 / 回收站 / 会话详情）</summary>
-
 ![主页侧边栏 ⋯ 菜单（标记未读、移动会话、删除会话）](assets/screenshot-session-submenu.png)
 
 ![主页侧边栏子代理折叠（「▸ N 子代理」徽标 + 就地展开）与「⑂ 分支」标记](assets/screenshot-session-subagent.png)
@@ -218,8 +215,6 @@ DSH 给每个会话日志加了单写者锁。会话一旦被打开（哪怕只�
 ![回收站](assets/screenshot-session-trash.png)
 
 ![会话详情（磁盘占用 / 统计 / 工具使用）](assets/screenshot-session-details.png)
-
-</details>
 
 ## 已知限制
 
@@ -247,8 +242,7 @@ DSH Desktop 和 `dsh web` 都能用，同一套 host + client。macOS / Windows 
 
 没验证过的未来 runtime 默认只开能认出来的安全能力，以面板上的提示和 `/archived-sessions/capabilities` 的返回为准，不看方法在不在。
 
-<details>
-<summary>旧 runtime 上具体会少什么、绕在哪</summary>
+### 旧 runtime 上具体会少什么、绕在哪
 
 - **回收站恢复**先校验底层会话还在不在（live / `stat` / 列表三级）。不在了返回 `DSM_SESSION_MISSING`，已经彻底删过是 `DSM_SESSION_PURGED`，索引还在但日志文件没了是 `DSM_SESSION_LOG_MISSING`；位置无法核实时标 `unverified`，不假装校验通过。恢复到「工作区已删除」的会话会成功，并提示它暂时归到「未分组」。
 - **彻底删除 / 清空回收站 / 自动物理清理**：官方公共契约没有删除 API，走的是 legacy 时代的半官方路线：从后端实例的存储根目录字段出发做三层守卫式推导（根目录 → 会话目录结构 → 会话 ID 归属校验），通过后整目录删除，再用官方 `stat` 复核。有活跃写入的会话直接拒绝（409）。推导不出来（比如确认不了存储根目录）就禁用并说明原因，不盲删。同目录并存的多代日志会一起清掉，否则 DSH 会回退读到旧代，等于没删。
@@ -257,8 +251,6 @@ DSH Desktop 和 `dsh web` 都能用，同一套 host + client。macOS / Windows 
 - **元数据缓存**：判断日志有没有变化，新 runtime 用官方快照的 `revision`（只在同一进程内可比，不会写进跨重启的缓存文件），旧的用 `(mtime, size)` 指纹。列表的目录和创建时间直接取快照会话头，不读日志；标题也不在页面加载时现读，缓存里没有就先留空，后台分批补上再刷出来。读取失败和「确实没有标题」是两回事：失败不写缓存，稍后重试（那种会话日志一变就立刻再试），偶发一次失败不会让会话永久挂着「（无标题）」。
 - **自动归档**在新 runtime 上拿不到可靠的「最后活跃时间」，证明不了闲置就跳过（`no-activity-data`），不猜。
 - **侧栏注入**的 DOM / React fiber 识别收在一个可版本化的 adapter 里。上游侧栏结构认不出来时整体安全停用，不影响官方侧栏本身。认出来时以 MutationObserver 增量驱动为主，只留低频兜底扫描。
-
-</details>
 
 ## 开发
 
@@ -273,8 +265,7 @@ npm test
 
 改版本号后必须一并重建。构建指纹是 `vX.Y.Z+源码哈希`，这道比对才靠得住。
 
-<details>
-<summary>源码结构</summary>
+### 源码结构
 
 ```
 package.json         npm 元数据 + dsh.bundle.patch + dsh.client（浏览器半注册）
@@ -310,10 +301,7 @@ src/client/index.jsx       client 入口：设置面板、侧栏增强、官方 
 src/client/logic.js        可单测的纯逻辑（折叠、计数、筛选、拖拽步长等）
 ```
 
-</details>
-
-<details>
-<summary>Host 路由</summary>
+### Host 路由
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -353,8 +341,6 @@ src/client/logic.js        可单测的纯逻辑（折叠、计数、筛选、�
 | POST | `/archived-sessions/auto-archive/settings` | 读取或更新自动归档策略 `{ inactiveDays, skipStarred }`；读取时惰性触发每日检查 |
 | POST | `/archived-sessions/auto-archive/run` | 立即执行一次自动归档检查（忽略每日节流） |
 | POST | `/archived-sessions/capabilities` | 当前持久化代际、读取 / 归档 / 回收站 / 永久删除 / 跨工作区移动能力，以及两份客户端回显：`clientMenu: { mode, at }`（菜单通道，`contextMenus` 或 `dom`）与 `clientUi: { navSection, navIcons, navOwn, navFallback, navIconRenders, sessionRows, workspaceRows, overflowRows, stateDots, tokenBgLayer2, tokenWarn, at }`（界面自证：只含计数与令牌解析值，不含任何标题或正文） |
-
-</details>
 
 ## License
 
