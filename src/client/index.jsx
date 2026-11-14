@@ -11,7 +11,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { aliveSessionCount, applyTagFilter, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, shouldHideEmptyGroup, starredOf, tagDeleteConfirm, titleBackfillDecision, toastDurationFor, workspaceForNodes } from './logic.js'
+import { aliveSessionCount, applyTagFilter, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, matchWorkspaceFilter, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, shouldHideEmptyGroup, starredOf, tagDeleteConfirm, titleBackfillDecision, toastDurationFor, workspaceForNodes, WS_GONE, WS_UNGROUPED } from './logic.js'
 
 export const inject = ['slots']
 
@@ -1200,7 +1200,9 @@ function SessionPanel({ workspacesSvc }) {
     const tagPassed = applyTagFilter(base, tagsReady ? tagFilter : '')
     const needle = query.trim().toLocaleLowerCase()
     const filtered = tagPassed.filter((item) => {
-      if (workspaceFilter !== 'all' && (item.workspacePath || '') !== workspaceFilter) return false
+      // issue #29：工作区口径收在 logic.matchWorkspaceFilter 里（全部 / 未分组 /
+      // 工作区已删 / 具体路径）。原先是路径精确相等，空路径的会话只能靠「全部」看。
+      if (!matchWorkspaceFilter(item, workspaceFilter)) return false
       if (!needle) return true
       // v3.6.2 #6：占位标题的会话按「有效标题」（列表值 → 侧栏权威回落）匹配，
       // 预热补齐但面板未刷新时也能按关键词搜到。
@@ -2057,9 +2059,14 @@ function SessionPanel({ workspacesSvc }) {
                   <label htmlFor="dsm-workspace-filter">工作区</label>
                   <select id="dsm-workspace-filter" value={workspaceFilter} onChange={(e) => setWorkspaceFilter(e.target.value)}>
                     <option value="all">全部工作区</option>
+                    {/* issue #29：两项「非路径」口径。顺序按面板 chip 的语义排：
+                        完全没有路径 = 未分组；有路径但已不在注册表 = 工作区已删。 */}
+                    <option value={WS_UNGROUPED}>未分组</option>
+                    <option value={WS_GONE}>工作区已删</option>
                     {workspaces.map((w) => <option key={w.workspaceId} value={w.path}>{w.title}</option>)}
-                    {/* 已存筛选可能指向已删除的工作区：补一个兜底 option，select 永不显示空白。 */}
-                    {workspaceFilter !== 'all' && !workspaces.some((w) => w.path === workspaceFilter) && (
+                    {/* 已存筛选可能指向已删除的工作区：补一个兜底 option，select 永不显示空白。
+                        两个哨兵不是路径，不能走这条兜底（否则会渲染成「已删工作区 · ?」）。 */}
+                    {workspaceFilter !== 'all' && workspaceFilter !== WS_UNGROUPED && workspaceFilter !== WS_GONE && !workspaces.some((w) => w.path === workspaceFilter) && (
                       <option value={workspaceFilter}>已删工作区 · {pathName(workspaceFilter) || '?'}</option>
                     )}
                   </select>

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { aliveSessionCount, applyTagFilter, ascBranchTime, authoritativeTitleForFirstPaint, branchTimeKey, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, moveNoticeText, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, shouldHideEmptyGroup, starredOf, tagDeleteConfirm, titleBackfillDecision, TOAST_MAX_MS, TOAST_MIN_MS, toastDurationFor, workspaceForNodes } from '../src/client/logic.js'
+import { aliveSessionCount, applyTagFilter, ascBranchTime, authoritativeTitleForFirstPaint, branchTimeKey, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, matchWorkspaceFilter, moveNoticeText, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, shouldHideEmptyGroup, starredOf, tagDeleteConfirm, titleBackfillDecision, TOAST_MAX_MS, TOAST_MIN_MS, toastDurationFor, workspaceForNodes, WS_GONE, WS_UNGROUPED } from '../src/client/logic.js'
 
 test('authoritative title only corrects the first cold paint', () => {
   assert.equal(authoritativeTitleForFirstPaint({ firstPaint: true, rendered: '旧 header', authoritative: '最新标题' }), '最新标题')
@@ -889,4 +889,59 @@ test('dragAutoScrollStep tolerates broken geometry and disabled limits', () => {
   assert.equal(dragAutoScrollStep({ y: 10, top: 0, bottom: 100, edge: 0 }), 0)
   // maxStep 变小，满速跟着变小（常量是可调的）。
   assert.equal(dragAutoScrollStep({ y: -50, top: 0, bottom: 100, maxStep: 6 }), -6)
+})
+
+// ---- matchWorkspaceFilter：issue #29 的工作区筛选口径 ----------------------
+test('matchWorkspaceFilter passes everything through for all / empty selectors', () => {
+  assert.equal(matchWorkspaceFilter({ workspacePath: '/w1', hasWorkspace: true }, 'all'), true)
+  assert.equal(matchWorkspaceFilter({ workspacePath: null, hasWorkspace: false }, 'all'), true)
+  assert.equal(matchWorkspaceFilter({}, ''), true)
+  assert.equal(matchWorkspaceFilter({}, undefined), true)
+  assert.equal(matchWorkspaceFilter(null, 'all'), true)
+})
+
+test('matchWorkspaceFilter isolates sessions that carry no workspace path', () => {
+  const ungrouped = { sessionId: 'a', workspacePath: null, hasWorkspace: false, workspaceGone: false }
+  const gone = { sessionId: 'b', workspacePath: '/gone', hasWorkspace: true, workspaceGone: true }
+  const live = { sessionId: 'c', workspacePath: '/w1', hasWorkspace: true, workspaceGone: false }
+  assert.equal(matchWorkspaceFilter(ungrouped, WS_UNGROUPED), true)
+  // 有路径但工作区已删 ≠ 未分组（面板 chip 是「工作区已删 · X」，不能混为一谈）
+  assert.equal(matchWorkspaceFilter(gone, WS_UNGROUPED), false)
+  assert.equal(matchWorkspaceFilter(live, WS_UNGROUPED), false)
+  // 老数据没有 hasWorkspace：按 workspacePath 兜底
+  assert.equal(matchWorkspaceFilter({ workspacePath: '' }, WS_UNGROUPED), true)
+  assert.equal(matchWorkspaceFilter({ sessionId: 'd' }, WS_UNGROUPED), true)
+  assert.equal(matchWorkspaceFilter({ workspacePath: '/w1' }, WS_UNGROUPED), false)
+})
+
+test('matchWorkspaceFilter isolates sessions whose workspace is gone', () => {
+  const gone = { workspacePath: '/gone', hasWorkspace: true, workspaceGone: true }
+  const live = { workspacePath: '/w1', hasWorkspace: true, workspaceGone: false }
+  const ungrouped = { workspacePath: null, hasWorkspace: false, workspaceGone: false }
+  assert.equal(matchWorkspaceFilter(gone, WS_GONE), true)
+  assert.equal(matchWorkspaceFilter(live, WS_GONE), false)
+  assert.equal(matchWorkspaceFilter(ungrouped, WS_GONE), false)
+  // 兜底：只有 workspaceGone 标记、没有 hasWorkspace 时按路径推断
+  assert.equal(matchWorkspaceFilter({ workspacePath: '/gone', workspaceGone: true }, WS_GONE), true)
+  assert.equal(matchWorkspaceFilter({ workspacePath: '', workspaceGone: true }, WS_GONE), false)
+  assert.equal(matchWorkspaceFilter({}, WS_GONE), false)
+})
+
+test('matchWorkspaceFilter keeps exact-path matching for real workspaces', () => {
+  assert.equal(matchWorkspaceFilter({ workspacePath: '/w1' }, '/w1'), true)
+  assert.equal(matchWorkspaceFilter({ workspacePath: '/w2' }, '/w1'), false)
+  assert.equal(matchWorkspaceFilter({ workspacePath: null }, '/w1'), false)
+  // 哨兵与真实路径互不误伤：路径永远是绝对路径，不会等于哨兵字面量
+  assert.equal(matchWorkspaceFilter({ workspacePath: '/w1' }, WS_UNGROUPED), false)
+  assert.equal(matchWorkspaceFilter({ workspacePath: '/w1' }, WS_GONE), false)
+})
+
+test('saved filters round-trip the #29 sentinels without degradation', () => {
+  for (const ws of [WS_UNGROUPED, WS_GONE]) {
+    const snap = filterSnapshotOf({ filter: 'all', workspaceFilter: ws, sortBy: 'newest', tagFilter: '' })
+    assert.equal(snap.workspace, ws)
+    const shape = filterShapeFromSaved({ id: 'x', name: '未分组', filters: snap })
+    assert.equal(shape.workspace, ws)
+    assert.deepEqual(shape.degraded, [])
+  }
 })

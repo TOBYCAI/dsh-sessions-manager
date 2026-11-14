@@ -422,9 +422,43 @@ export function tagDeleteConfirm(name) {
   return `删除标签「${String(name == null ? '' : name) || '(未命名)'}」？只删标签，不会删除会话；打过这个标签的会话只是失去它。`
 }
 
+// issue #29：工作区筛选除了「全部」和真实路径，还要能表达两类「没有可用工作区」
+// 的会话。工作区路径一定是绝对路径，所以这两个哨兵不会和真实工作区撞车；它们
+// 是非空字符串，因此能原样进「保存筛选」的 workspace 字段（口径见下方注释）。
+//   · 未分组     = 完全没有工作区路径 → 面板 chip 显示「未分组」
+//   · 工作区已删 = 有路径、但该路径已不在工作区注册表里 → chip 显示「工作区已删 · X」
+// DSH 侧栏把这两类都归进「未分组」组；但面板自己的 chip 是分开的，筛选也拆成
+// 两项——否则选「未分组」却列出一整屏「工作区已删 · X」的卡片，自相矛盾。
+export const WS_UNGROUPED = '__ungrouped__'
+export const WS_GONE = '__workspace_gone__'
+
+/**
+ * 工作区筛选谓词：把「全部 / 未分组 / 工作区已删 / 具体路径」四种口径收敛到
+ * 一处，client 侧只管调用（口径可单测，别在渲染管线里散落条件）。
+ *
+ * `hasWorkspace` / `workspaceGone` 由 host 侧 buildItem 给出（src/index.js:
+ * `workspaceGone: !!(cwd && !ws)`、`hasWorkspace: !!cwd`）；字段缺失时按
+ * workspacePath 兜底，保证旧数据/手造数据也能筛。
+ *
+ * @param {object|null|undefined} item /archived-sessions/sessions 的一行
+ * @param {string} [workspaceFilter='all']
+ * @returns {boolean}
+ */
+export function matchWorkspaceFilter(item, workspaceFilter = 'all') {
+  const sel = typeof workspaceFilter === 'string' && workspaceFilter ? workspaceFilter : 'all'
+  if (sel === 'all') return true
+  const it = item && typeof item === 'object' ? item : {}
+  const path = typeof it.workspacePath === 'string' ? it.workspacePath : ''
+  const hasPath = typeof it.hasWorkspace === 'boolean' ? it.hasWorkspace : !!path
+  if (sel === WS_UNGROUPED) return !hasPath
+  if (sel === WS_GONE) return hasPath && !!it.workspaceGone
+  return path === sel
+}
+
 // 已存筛选快照的字段域：视图与排序必须落在已知枚举里，否则应用一个不存在的
 // 视图会把面板带进没有 tab 的状态。workspace 只验「非空字符串」——工作区可能
-// 已删，删了也允许恢复（筛选结果为 0 行，用户可理解）；tag 允许 ''（=全部）。
+// 已删，删了也允许恢复（筛选结果为 0 行，用户可理解）；#29 的两个哨兵同样
+// 是非空字符串，因此保存/还原天然支持，无需额外枚举；tag 允许 ''（=全部）。
 const SAVED_VIEWS = ['all', 'active', 'archived', 'starred', 'empty', 'trash']
 const SAVED_SORTS = ['newest', 'oldest', 'title']
 
