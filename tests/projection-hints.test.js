@@ -66,6 +66,17 @@ test('readCachedHints degrades to null without the service (0.1.7 / 0.2.0 early)
   assert.equal(readCachedHints({ cachedSnapshot: () => ({ asOfSeq: 1, values: { title: 'x' } }) }, null, null), null)
 })
 
+test('without summaryKeys the reader asks for a bounded key set, never "all keys"', () => {
+  // 0.2.1 一代没有 summaryKeys()：不能传 undefined（那会让官方把每个注册了 wire
+  // 的投影都 parse 一遍，可能有整段消息日志）。只问我们要的两个键。
+  let seen = null
+  const cache = { cachedSnapshot: (header, keys) => { seen = keys; return undefined } }
+  readCachedHints(cache, null, HEADER)
+  assert.ok(Array.isArray(seen) || seen instanceof Set)
+  const set = seen instanceof Set ? seen : new Set(seen)
+  assert.deepEqual([...set].sort(), ['sessionListMetadata', 'title'])
+})
+
 test('readCachedHints swallows a broken service instead of failing the listing', () => {
   const throwing = {
     cachedSnapshot: () => { throw new Error('boom') },

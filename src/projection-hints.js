@@ -35,6 +35,15 @@ export function hintsFromValues(values, opts) {
 }
 
 /**
+ * 没有 `summaryKeys()`（0.2.1 一代）时用的最小键集。
+ *
+ * 为什么不用 `undefined`（= 全部键）：`viewCheckpoint` 会把每个注册了 `wire` 的
+ * 投影都 parse 一遍，那里面可能有整段消息/工具日志——侧栏每拍对每条会话都读一次
+ * 全部键是不可接受的。这两个键都拿不到时也只是「没有提示」，不会出错。
+ */
+const FALLBACK_KEYS = Object.freeze(['title', 'sessionListMetadata'])
+
+/**
  * 读一条会话的冷提示（同步、零 I/O）。
  *
  * 先用 `cachedSnapshot(header, summaryKeys())`：这是当前格式代的完整视图；
@@ -53,8 +62,8 @@ export function readCachedHints(cache, registry, header) {
   // 常量（拿到未注册的键无害，但拿不到新注册的键就会白丢一次命中）。
   let keys
   try {
-    keys = registry && typeof registry.summaryKeys === 'function' ? registry.summaryKeys() : undefined
-  } catch (e) { keys = undefined }
+    keys = registry && typeof registry.summaryKeys === 'function' ? registry.summaryKeys() : FALLBACK_KEYS
+  } catch (e) { keys = FALLBACK_KEYS }
   let snap = null
   try { snap = cache.cachedSnapshot(header, keys) } catch (e) { snap = null }
   if (!snap && typeof cache.cachedPredecessorTitle === 'function') {
