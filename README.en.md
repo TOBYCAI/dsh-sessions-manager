@@ -196,6 +196,9 @@ The plugin hides empty rows in the sidebar, but **the current session is never h
 
 ## Screenshots
 
+<details>
+<summary>Expand for the 10 screenshots (sidebar menu / sidebar subagent folding / settings panel / batch move / empty view / auto-archive / storage usage / starred / recycle bin / session details)</summary>
+
 ![Sidebar ⋯ menu: mark unread, move session, delete session](assets/screenshot-session-submenu.png)
 
 ![Sidebar subagent folding ("▸ N 子代理" badge + in-place expansion) and the "⑂ 分支" branch badge](assets/screenshot-session-subagent.png)
@@ -215,6 +218,8 @@ The plugin hides empty rows in the sidebar, but **the current session is never h
 ![Recycle bin](assets/screenshot-session-trash.png)
 
 ![Session details: disk usage / stats / tool usage](assets/screenshot-session-details.png)
+
+</details>
 
 ## Known limitations
 

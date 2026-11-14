@@ -196,6 +196,9 @@ DSH 给每个会话日志加了单写者锁。会话一旦被打开（哪怕只�
 
 ## 截图
 
+<details>
+<summary>展开查看 10 张截图（侧边栏菜单 / 侧栏子代理折叠 / 设置面板 / 批量移动 / 空白视图 / 自动归档 / 存储占用 / 已收藏 / 回收站 / 会话详情）</summary>
+
 ![主页侧边栏 ⋯ 菜单（标记未读、移动会话、删除会话）](assets/screenshot-session-submenu.png)
 
 ![主页侧边栏子代理折叠（「▸ N 子代理」徽标 + 就地展开）与「⑂ 分支」标记](assets/screenshot-session-subagent.png)
@@ -215,6 +218,8 @@ DSH 给每个会话日志加了单写者锁。会话一旦被打开（哪怕只�
 ![回收站](assets/screenshot-session-trash.png)
 
 ![会话详情（磁盘占用 / 统计 / 工具使用）](assets/screenshot-session-details.png)
+
+</details>
 
 ## 已知限制
 
