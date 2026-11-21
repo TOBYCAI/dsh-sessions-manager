@@ -30,6 +30,37 @@ export function titleBackfillDecision({ rendered = '', baseline = null, authorit
   return { text: auth, changed: true, nextBaseline: { text: auth, authoritative: auth } }
 }
 
+// 侧栏 ⋯ 菜单的收藏项文案（issue #30）：同一位置按状态切换「收藏 / 取消收藏」，
+// 与设置面板的行为对齐——那边也是原地切换，而不是「收藏」+「已收藏」并列两项。
+export function starMenuLabel(starred) {
+  return starred ? '取消收藏' : '收藏会话'
+}
+
+// ⋯ 菜单收藏项的星标图标：数据化菜单项要自己注册 keyed slot 才画得出图标，
+// 官方项（置顶/重命名/分叉/复制/归档）都带前置 glyph，这里对齐成同一种形状，
+// 已收藏给实心星。
+// 星形几何只此一份：面板/菜单/老宿主 DOM 注入三条路径共用同一条 path。
+export const STAR_PATH = 'M12 3.6l2.55 5.3 5.85.8-4.28 4.1 1.03 5.8L12 16.9l-5.15 2.7 1.03-5.8-4.28-4.1 5.85-.8z'
+export const STAR_ICON_KEYS = { off: 'dsm.star', on: 'dsm.star-on' }
+export function starMenuIconKey(starred) {
+  return starred ? STAR_ICON_KEYS.on : STAR_ICON_KEYS.off
+}
+
+// 菜单快照 = 服务端集合 + 本地刚写过的状态。刷新请求可能在写入之前发出、之后返回，
+// 直接采信会把刚点的「收藏」当场盖回原文案；所以 ttl 窗口内以本地为准，超窗的写入
+// 视作过期（交给调用方从本地表里删掉），之后重新听服务端。
+export function overlayStarred(serverIds, localWrites, now, ttl) {
+  const starred = new Set()
+  for (const id of serverIds || []) starred.add(String(id))
+  const expired = []
+  for (const [id, write] of localWrites || []) {
+    if (!write || typeof write.at !== 'number' || now - write.at > ttl) { expired.push(id); continue }
+    if (write.starred) starred.add(id)
+    else starred.delete(id)
+  }
+  return { starred, expired }
+}
+
 // v3.6.2 #6：列表搜索/标题排序的「有效标题」= 列表项标题，缺时回落到侧栏
 // 权威标题缓存（预热补齐后即使面板还没刷新，搜索/排序也按真标题工作）。
 export function effectiveTitleOf(item, authoritativeTitles) {

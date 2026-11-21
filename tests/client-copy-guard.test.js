@@ -44,6 +44,14 @@ test('「纯净视图」不再出现在任何渲染文案里（该开关 0.1.3 �
 // 出厂形态校验（大写 \uXXXX 转义）——若 lib/ 不存在（首次 clone 未构建）则跳过。
 const esc = (s) => [...s].map((c) => c.codePointAt(0) > 127 ? '\\u' + c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0') : c).join('')
 
+test('收藏菜单文案已出厂：lib/ 内的转义形态都能找到', () => {
+  let lib
+  try { lib = readFileSync(join(import.meta.dirname, '../lib/client.js'), 'utf8') } catch { return }
+  for (const copy of ['收藏会话', '已收藏', '已取消收藏', '收藏失败']) {
+    assert.ok(lib.includes(esc(copy)), 'lib/client.js 缺少出厂文案「' + copy + '」—— 改完 src 忘了 npm run build')
+  }
+})
+
 test('预构建 bundle 与文案改动同步：lib/ 内「血统」转义形态 0 命中', () => {
   let lib
   try { lib = readFileSync(join(import.meta.dirname, '../lib/client.js'), 'utf8') } catch { return }

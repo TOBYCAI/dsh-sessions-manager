@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { aliveSessionCount, applyTagFilter, ascBranchTime, authoritativeTitleForFirstPaint, branchTimeKey, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, matchWorkspaceFilter, moveNoticeText, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, shouldHideEmptyGroup, starredOf, tagDeleteConfirm, titleBackfillDecision, TOAST_MAX_MS, TOAST_MIN_MS, toastDurationFor, workspaceForNodes, WS_GONE, WS_UNGROUPED } from '../src/client/logic.js'
+import { aliveSessionCount, applyTagFilter, ascBranchTime, authoritativeTitleForFirstPaint, branchTimeKey, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, matchWorkspaceFilter, moveNoticeText, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, shouldHideEmptyGroup, STAR_ICON_KEYS, starMenuIconKey, overlayStarred, starMenuLabel, starredOf, tagDeleteConfirm, titleBackfillDecision, TOAST_MAX_MS, TOAST_MIN_MS, toastDurationFor, workspaceForNodes, WS_GONE, WS_UNGROUPED } from '../src/client/logic.js'
 
 test('authoritative title only corrects the first cold paint', () => {
   assert.equal(authoritativeTitleForFirstPaint({ firstPaint: true, rendered: '旧 header', authoritative: '最新标题' }), '最新标题')
@@ -76,6 +76,42 @@ test('starredOf returns only starred items and tolerates junk', () => {
   assert.deepEqual(starredOf(items).map((x) => x.sessionId), ['a', 'd'])
   assert.deepEqual(starredOf(null), [])
   assert.deepEqual(starredOf(undefined), [])
+})
+
+// ---- starMenuLabel：⋯ 菜单收藏项文案（issue #30） -----------------------------
+
+test('starMenuIconKey maps starred state onto the registered icon keys', () => {
+  assert.equal(starMenuIconKey(true), STAR_ICON_KEYS.on)
+  assert.equal(starMenuIconKey(false), STAR_ICON_KEYS.off)
+  assert.equal(starMenuIconKey(undefined), STAR_ICON_KEYS.off)
+  assert.notEqual(STAR_ICON_KEYS.on, STAR_ICON_KEYS.off)
+})
+
+test('overlayStarred keeps local writes inside the window and drops stale ones', () => {
+  const now = 100000
+  const ttl = 30000
+  const local = new Map([
+    ['fresh-star', { starred: true, at: now - 1000 }],
+    ['fresh-unstar', { starred: false, at: now - 20000 }],
+    ['stale', { starred: true, at: now - ttl - 1 }],
+    ['broken', { starred: true }],
+  ])
+  const { starred, expired } = overlayStarred(['fresh-unstar', 'server-only', 'fresh-star'], local, now, ttl)
+  assert.deepEqual([...starred].sort(), ['fresh-star', 'server-only'])
+  assert.deepEqual(expired.sort(), ['broken', 'stale'])
+})
+
+test('overlayStarred leaves the server set alone when nothing was written locally', () => {
+  const { starred, expired } = overlayStarred(['a', 'b'], new Map(), 1, 1000)
+  assert.deepEqual([...starred].sort(), ['a', 'b'])
+  assert.deepEqual(expired, [])
+})
+
+test('starMenuLabel flips between star and unstar copy', () => {
+  assert.equal(starMenuLabel(true), '取消收藏')
+  assert.equal(starMenuLabel(false), '收藏会话')
+  // 快照冷态（未知）按未收藏处理，与 DOM 路径「先显示收藏会话、预热后校正」一致。
+  assert.equal(starMenuLabel(undefined), '收藏会话')
 })
 
 test('starredOf is orthogonal to archive state', () => {

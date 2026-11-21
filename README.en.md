@@ -10,7 +10,7 @@
 
 DSH gives you exactly one way to close out a session: archive it. You can't delete one, can't move it to another workspace, can't tell which session spawned which, and have no idea which forgotten conversation is sitting on a few hundred megabytes of disk.
 
-This plugin fills those gaps. A new panel under Settings, three extra items in the sidebar's session ⋯ menu. Deletes land in a recycle bin first, so a wrong click is recoverable. Moving a session across workspaces no longer means starting a new conversation. Subagents and forks become visible, and empty sessions can be cleaned up in bulk. Reads and writes go through DSH's official surface. The host isn't forked or patched.
+This plugin fills those gaps. A new panel under Settings, four extra items in the sidebar's session ⋯ menu. Deletes land in a recycle bin first, so a wrong click is recoverable. Moving a session across workspaces no longer means starting a new conversation. Subagents and forks become visible, and empty sessions can be cleaned up in bulk. Reads and writes go through DSH's official surface. The host isn't forked or patched.
 
 ## Install
 
@@ -39,7 +39,7 @@ To remove it: `dsh plugin --profile desktop remove dsh-sessions-manager`. No ses
 
 | Where | What's added |
 |---|---|
-| Sidebar session ⋯ menu | Mark unread, move session, delete session |
+| Sidebar session ⋯ menu | Mark unread, star / unstar, move session, delete session |
 | Sidebar parent rows | "▸ N 子代理" folding, a green "⑂ 分支" badge |
 | Settings → 会话管理 | Every session, with search, filters, details and batch actions |
 | Same panel → Recycle bin | Deleted sessions, restorable or purgeable |
@@ -48,9 +48,10 @@ To remove it: `dsh plugin --profile desktop remove dsh-sessions-manager`. No ses
 
 ### The ⋯ menu
 
-Three items, slotted between DSH's own by risk. Pin, rename, fork, copy Session ID and archive stay exactly as they were.
+Four items, slotted between DSH's own by risk. Pin, rename, fork, copy Session ID and archive stay exactly as they were.
 
 - **Mark unread** (top). The status dot turns blue, and the mark clears itself when you open the session. The blue dot is clickable too, and clicking it clears the mark.
+- **Star / unstar**. Once a session is starred the item reads "取消收藏" instead, and clicking it switches back — the same switch and the same store as the star at the left of a row in the panel: a change made from the menu shows up in the panel as soon as it opens, while a change made in the panel can take up to half a minute to reach the menu (it caches session state for 30 s).
 - **Move session** (below Archive). A workspace list opens to the right; pick one and it moves. The workspace it's already in is labeled "当前" and can't be picked.
 - **Delete session** (bottom, in red). Goes to the recycle bin, not an immediate physical delete.
 
