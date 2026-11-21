@@ -11,7 +11,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { aliveSessionCount, applyTagFilter, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, matchWorkspaceFilter, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, shouldHideEmptyGroup, starredOf, tagDeleteConfirm, titleBackfillDecision, toastDurationFor, workspaceForNodes, WS_GONE, WS_UNGROUPED } from './logic.js'
+import { aliveSessionCount, applyTagFilter, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, matchWorkspaceFilter, noticeToastPlan, openSubagentToast, overflowPlan, overlayStarred, pathTail, STAR_PATH, remainingRows, sessionForNodes, shortId, shouldHideEmptyGroup, STAR_ICON_KEYS, starMenuIconKey, starMenuLabel, starredOf, tagDeleteConfirm, titleBackfillDecision, toastDurationFor, workspaceForNodes, WS_GONE, WS_UNGROUPED } from './logic.js'
 
 export const inject = ['slots']
 
@@ -3240,9 +3240,26 @@ function installSidebarSessionMenuAug(ctx) {
   // 预算（Config.resolutionTimeoutMs 默认 1000ms）：超时按失败处理，菜单项会直接
   // 消失并弹一条失败提示。所以 resolve 一律**同步**只读缓存，绝不在里面等网络：
   // 缓存空就返回一个 disabled 项，同时在后台预热，下次打开菜单即可用。
-  let menuSnapshot = { at: 0, workspaces: [], sessionPath: new Map() }
+  // 收藏状态搭同一份快照：/archived-sessions/sessions 的每一项已由 host 注解
+  // `starred`（src/index.js allSessionItems），所以 ⋯ 菜单的「收藏 / 取消收藏」
+  // 既不需要新路由，也不需要异步 resolve（rc.3 的 1s 预算）。
+  let menuSnapshot = { at: 0, workspaces: [], sessionPath: new Map(), starred: new Set() }
   let menuSnapshotLoading = null
   const MENU_SNAPSHOT_TTL = 30000
+  // 本地刚改过星标的会话：菜单快照的刷新请求可能早于这次写入发出、晚于它返回，
+  // 直接把服务端的旧状态盖回来，刚点的「收藏」就会当场变回原文案。这里按时间
+  // 兜一层：窗口内以本地为准，过期条目在下次构建快照时顺手清掉。
+  const starLocal = new Map()
+  // 与 MENU_SNAPSHOT_TTL 一致：超过这个时长的写入不算「刚点过」，交回服务端真值。
+  const STAR_LOCAL_TTL = 30000
+  // 收藏改完立刻回写快照：同一次会话里 TTL 内再开菜单很常见，文案不能等下次刷新。
+  const setStarSnapshot = (id, starred) => {
+    const next = new Set(menuSnapshot.starred)
+    if (starred) next.add(id)
+    else next.delete(id)
+    starLocal.set(id, { starred, at: Date.now() })
+    menuSnapshot = { ...menuSnapshot, starred: next }
+  }
   const refreshMenuSnapshot = () => {
     if (menuSnapshotLoading) return menuSnapshotLoading
     menuSnapshotLoading = (async () => {
@@ -3252,12 +3269,18 @@ function installSidebarSessionMenuAug(ctx) {
           postJSON('/archived-sessions/sessions', {}),
         ])
         const sessionPath = new Map()
+        const serverStarred = []
         for (const item of (sess && sess.items) || []) {
-          if (item && item.sessionId != null && typeof item.workspacePath === 'string') {
-            sessionPath.set(String(item.sessionId), item.workspacePath)
-          }
+          if (!item || item.sessionId == null) continue
+          const id = String(item.sessionId)
+          if (typeof item.workspacePath === 'string') sessionPath.set(id, item.workspacePath)
+          if (item.starred === true) serverStarred.push(id)
         }
-        menuSnapshot = { at: Date.now(), workspaces: (ws && ws.items) || [], sessionPath }
+        // 在途刷新带来的可能是写入前的旧状态：本地最近写过的会话以本地为准。
+        const now = Date.now()
+        const { starred, expired } = overlayStarred(serverStarred, starLocal, now, STAR_LOCAL_TTL)
+        for (const id of expired) starLocal.delete(id)
+        menuSnapshot = { at: now, workspaces: (ws && ws.items) || [], sessionPath, starred }
       } catch (e) {
         // 保留上一份快照：宁可列稍旧的工作区，也不要让「移动会话」整项消失。
       } finally {
@@ -3278,11 +3301,15 @@ function installSidebarSessionMenuAug(ctx) {
   let dataMenusRegistered = false
   const registerDataMenus = (svc) => {
     if (dataMenusRegistered) return
-    dataMenusRegistered = true
+    // 单条注册失败（例如旧实例还没注销导致的重复注册）不该拖垮其余菜单项：逐条兜住，
+    // 失败的那条只是不出现。
+    const registerOne = (make, label) => {
+      try { ctx.effect(make, label) } catch (e) { /* 这一条不出现，其余照旧 */ }
+    }
     // 官方会话项 order：pin 100 / rename 200 / fork 300 / 复制 ID 450 / 归档 600
     // （归档带 afterContent，渲染在同级 footer）。标记未读排最前；移动与删除
     // 同样走 afterContent，按「归档 → 移动 → 删除」的危险度递增顺序排在后面。
-    ctx.effect(() => svc.register({
+    registerOne(() => svc.register({
       id: 'dsm.mark-unread',
       target: 'session',
       order: 50,
@@ -3296,7 +3323,46 @@ function installSidebarSessionMenuAug(ctx) {
         }]
       },
     }), 'dsm: mark unread menu')
-    ctx.effect(() => svc.register({
+    // 收藏：会话级状态开关，排主组末尾（复制 ID 450 / 在应用中打开 500 之后、
+    // 归档 600 起的 footer 之前），不与「移动/删除」这类危险动作混排。
+    const starMenuItem = (id, starred) => ({
+      id: 'star',
+      label: starMenuLabel(starred),
+      icon: { key: starMenuIconKey(starred) },
+      // 乐观更新 + 失败回滚，与设置面板 toggleStar 同一套契约。失败自己报，
+      // 不依赖宿主的失败文案（菜单项文案已回滚成原值，不报就是静默失败）。
+      run: async () => {
+        // 以「用户看到的那一面」为准：宿主只在 observe 通知时重解析文案，快照在
+        // 菜单开着的这几百毫秒里被刷新的话，重读值会与文案相反（点「收藏会话」
+        // 却把收藏取消了）。resolve 时读到的 starred 才是菜单文案的来源。
+        const next = !starred
+        setStarSnapshot(id, next)
+        try {
+          await postJSON('/archived-sessions/star/set', { sessionId: id, starred: next })
+          toast(next ? '已收藏' : '已取消收藏')
+        } catch (e) {
+          setStarSnapshot(id, !next)
+          toast('收藏失败：' + String((e && e.message) || e))
+        }
+      },
+    })
+    // 同步 resolve 读快照里的布尔。唯一的例外是「快照从没拉成功过」：那时同步读会把
+    // 已收藏的会话显示成「收藏会话」，点下去只落一次重复收藏 —— 这种冷启动等一次往返
+    // 换准确文案（宿主给异步 resolve 的预算是 1 秒）。
+    registerOne(() => svc.register({
+      id: 'dsm.star',
+      target: 'session',
+      order: 550,
+      resolve: ({ sessionId }) => {
+        const id = String(sessionId)
+        if (!menuSnapshot.at) {
+          return refreshMenuSnapshot().then(() => [starMenuItem(id, menuSnapshot.starred.has(id))])
+        }
+        warmMenuSnapshot() // 过期时后台补齐，下一次打开就是真状态
+        return [starMenuItem(id, menuSnapshot.starred.has(id))]
+      },
+    }), 'dsm: star session menu')
+    registerOne(() => svc.register({
       id: 'dsm.move-session',
       target: 'session',
       order: 700,
@@ -3348,7 +3414,7 @@ function installSidebarSessionMenuAug(ctx) {
         }]
       },
     }), 'dsm: move session menu')
-    ctx.effect(() => svc.register({
+    registerOne(() => svc.register({
       id: 'dsm.delete-session',
       target: 'session',
       order: 800,
@@ -3360,11 +3426,39 @@ function installSidebarSessionMenuAug(ctx) {
         run: () => { openDeleteConfirm(String(sessionId)) },
       }],
     }), 'dsm: delete session menu')
+    // 幂等标志放在全部注册之后：中途抛错（例如旧实例还没注销导致的重复注册）
+    // 不该留下「半注册 + 已置位」的状态，那会让星标项彻底不出现。
+    dataMenusRegistered = true
+  }
+  // 数据化菜单项默认没有图标，而官方项（置顶 / 重命名 / 分叉 / 复制 / 归档）都带前置 glyph。
+  // 这里给「收藏」注册同款星标：未收藏空心、已收藏实心，形状与设置面板的星标一致。
+  const dsmStarMenuIcon = (filled) => function DsmStarMenuIcon() {
+    return (
+      <svg
+        width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
+        fill={filled ? 'currentColor' : 'none'} stroke="currentColor"
+        strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+      >
+        <path d={STAR_PATH} />
+      </svg>
+    )
+  }
+  const registerStarMenuIcons = () => {
+    // 插件头部已声明 inject: ['slots']；宿主若真没有这个 keyed slot，菜单项只是少一个
+    // 前置图标，文案与动作照常，不必也不能在注册期提前判断（inject 的回调是「声明
+    // 活时才跑」，返回值证明不了图标是否出现）。
+    try {
+      ctx.effect(() => ctx.slots.inject('contextMenu.icon', function* () {
+        yield ctx.slots.register({ name: 'contextMenu.icon', key: STAR_ICON_KEYS.off }, dsmStarMenuIcon(false))
+        yield ctx.slots.register({ name: 'contextMenu.icon', key: STAR_ICON_KEYS.on }, dsmStarMenuIcon(true))
+      }), 'dsm: star menu icon')
+    } catch (e) { /* 无该插槽：降级为不带图标 */ }
   }
   const activateDataMenus = () => {
     const svc = contextMenuSvc()
     if (!svc || typeof svc.register !== 'function' || typeof ctx.effect !== 'function') return false
     try { registerDataMenus(svc) } catch (e) { return false }
+    registerStarMenuIcons()
     // 预热门控：第一次打开 ⋯ 菜单就能直接拿到工作区子菜单，不必等一次往返。
     warmMenuSnapshot()
     dsmReportMenuMode('contextMenus')
@@ -3372,6 +3466,8 @@ function installSidebarSessionMenuAug(ctx) {
   }
 
   const augmentMenu = (menuEl, info) => {
+    // 老宿主（0.1.7–0.2.1）没有快照订阅：每次装菜单顺手预热，下次打开才是新状态。
+    warmMenuSnapshot()
     if (menuEl.querySelector('[' + AUG + ']')) return
     const viewport = menuEl.querySelector('[role="presentation"]') || menuEl.firstElementChild
     if (!viewport) return
@@ -3383,6 +3479,7 @@ function installSidebarSessionMenuAug(ctx) {
     const ICON_MOVE = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v4"/><path d="M10 13l2 2 2-2"/></svg>'
     const ICON_DEL = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/><path d="M9 7V4h6v3"/></svg>'
     const ICON_UNREAD = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg>'
+    const ICON_STAR = (on) => '<svg width="16" height="16" viewBox="0 0 24 24" fill="' + (on ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="' + STAR_PATH + '"/></svg>'
     const mk = (label, svg, danger) => {
       const wrap = protoWrap ? protoWrap.cloneNode(false) : document.createElement('div')
       if (protoWrapCls) wrap.className = protoWrapCls
@@ -3406,9 +3503,12 @@ function installSidebarSessionMenuAug(ctx) {
       wrap.appendChild(btn)
       return { wrap, btn }
     }
+    const starredNow = menuSnapshot.starred.has(String(info.id))
+    const star = mk(starMenuLabel(starredNow), ICON_STAR(starredNow), false)
     const move = mk('移动会话', ICON_MOVE, false)
     const del = mk('删除会话', ICON_DEL, true)
     const mark = mk(dsmLoadManual().has(info.id) ? '标记已读' : '标记未读', ICON_UNREAD, false)
+    if (starredNow && star.btn.firstChild) star.btn.firstChild.style.color = 'var(--dsw-alias-state-business-primary)'
     const moveCapability = dsmActionCapability('relocateSession') || dsmActionCapability('move')
     if (!moveCapability || !moveCapability.available) {
       move.btn.disabled = true
@@ -3439,10 +3539,29 @@ function installSidebarSessionMenuAug(ctx) {
       dsmToggleManual(info.id)
       closeMenu()
     })
+    star.btn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      e.preventDefault()
+      const id = info.id
+      // 用建这一行时的状态（文案就是照它写的）：菜单开着期间快照可能被刷新，
+      // 重读值会与用户看到的「收藏 / 取消收藏」相反。
+      const next = !starredNow
+      closeMoveSubmenu()
+      closeMenu()
+      setStarSnapshot(id, next)
+      postJSON('/archived-sessions/star/set', { sessionId: id, starred: next })
+        .then(() => toast(next ? '已收藏' : '已取消收藏'))
+        .catch((err) => {
+          setStarSnapshot(id, !next)
+          toast('收藏失败：' + String((err && err.message) || err))
+        })
+    })
     viewport.appendChild(move.wrap)
     viewport.appendChild(del.wrap)
     // 标记未读 goes to the very top of the menu (above DSH's native items).
     viewport.insertBefore(mark.wrap, viewport.firstElementChild)
+    // 收藏紧跟「标记未读」：两者都是会话级状态开关，不该沉到 footer。
+    viewport.insertBefore(star.wrap, mark.wrap.nextSibling)
     // DSH's portalled Menu clamped its position using the height it measured
     // before this shim injected rows, so the grown card can hang past the
     // viewport bottom and cover the sidebar foot. Reuse the host's own
@@ -3452,6 +3571,9 @@ function installSidebarSessionMenuAug(ctx) {
 
   // 0.2.2+ 优先走官方数据注册。拿不到服务时按旧版 DOM 注入，并在服务稍后
   // 出现时切过去 —— 插件 apply 可能早于 contextMenus 注册完成。
+  // 星标文案读同一份菜单快照：DOM 路径也要预热，否则老外壳上第一次打开 ⋯ 菜单，
+  // 已收藏的会话会先显示成「收藏会话」。
+  warmMenuSnapshot()
   if (activateDataMenus()) return
   dsmReportMenuMode('dom')
 
